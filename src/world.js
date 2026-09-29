@@ -1,0 +1,323 @@
+import * as THREE from 'three';
+
+// Shared world data used by the player, the monster and the arm:
+// static box colliders, optional terrain heightfield, hiding zones,
+// line of sight, noise events and a navigation grid for the monster.
+
+export function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const _ray = new THREE.Ray();
+const _hitP = new THREE.Vector3();
+const _dir = new THREE.Vector3();
+
+export class World {
+  constructor(scene) {
+    this.scene = scene;
+    this.colliders = [];        // static Box3s
+    this.dynamicColliders = []; // e.g. the monster's body (player only)
+    this.heightFn = null;       // (x, z) => y, or null for box-only maps
+    this.grass = [];            // { x, z, r } hiding zones
+    this.pools = [];            // { minX, maxX, minZ, maxZ } wading zones
+    this.noises = [];           // { pos, radius, t }
+    this.scent = [];            // player scent trail { x, z, t }, oldest first
+    this.scentEpoch = 0;        // bumps when the trail is washed away
+    this.nav = null;
+    this.time = 0;
+    this._gridDirty = true;
+    this._near = [];
+    this._stamp = 0;
+  }
+
+  addCollider(minX, minY, minZ, maxX, maxY, maxZ) {
+    const b = new THREE.Box3(new THREE.Vector3(minX, minY, minZ), new THREE.Vector3(maxX, maxY, maxZ));
+    this.colliders.push(b);
+    this._gridDirty = true;
+    return b;
+  }
+
+  // ---------------------------------------------------------------- spatial grid (XZ)
+  _buildGrid() {
+    const cell = (this._cell = 8);
+    this._grid = new Map();
+    this._marks = new Uint32Array(this.colliders.length);
+    this.colliders.forEach((c, i) => {
+      for (let x = Math.floor(c.min.x / cell); x <= Math.floor(c.max.x / cell); x++) {
+        for (let z = Math.floor(c.min.z / cell); z <= Math.floor(c.max.z / cell); z++) {
+          const k = x * 4096 + z;
+          let list = this._grid.get(k);
+          if (!list) this._grid.set(k, (list = []));
+          list.push(i);
+        }
+      }
+    });
+    this._gridDirty = false;
+  }
+
+  // Static colliders overlapping the XZ rectangle. The returned array is reused.
+  near(minX, minZ, maxX, maxZ) {
+    if (this._gridDirty) this._buildGrid();
+    const out = this._near;
+    out.length = 0;
+    const stamp = ++this._stamp;
+    const cell = this._cell;
+    for (let x = Math.floor(minX / cell); x <= Math.floor(maxX / cell); x++) {
+      for (let z = Math.floor(minZ / cell); z <= Math.floor(maxZ / cell); z++) {
+        const list = this._grid.get(x * 4096 + z);
+        if (!list) continue;
+        for (const i of list) {
+          if (this._marks[i] !== stamp) { this._marks[i] = stamp; out.push(this.colliders[i]); }
+        }
+      }
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- scent trail
+  addScent(pos, faint = false) {
+    const last = this.scent[this.scent.length - 1];
+    if (last && (last.x - pos.x) ** 2 + (last.z - pos.z) ** 2 < 1) return;
+    this.scent.push({ x: pos.x, z: pos.z, t: this.time, faint });
+    while (this.scent.length && this.time - this.scent[0].t > 90) this.scent.shift();
+  }
+
+  clearScent() {
+    this.scentMask = 0;
+    if (!this.scent.length) return;
+    this.scent.length = 0;
+    this.scentEpoch++;
+  }
+
+  // Called every frame with the player's state. Wading through blood wipes the
+  // trail and masks your scent for a while after you climb out; scent left while
+  // hidden in tall grass is faint (only smelled up close).
+  updateScent(dt, pos, wading, hidden = false) {
+    if (wading) { this.clearScent(); this.scentMask = 8; return; }
+    if (this.scentMask > 0) { this.scentMask -= dt; return; }
+    this.addScent(pos, hidden);
+  }
+
+  groundHeight(x, z) {
+    return this.heightFn ? this.heightFn(x, z) : -Infinity;
+  }
+
+  inGrass(x, z) {
+    for (const g of this.grass) if ((x - g.x) ** 2 + (z - g.z) ** 2 < g.r * g.r) return true;
+    return false;
+  }
+
+  inPool(x, z) {
+    for (const p of this.pools) if (x > p.minX && x < p.maxX && z > p.minZ && z < p.maxZ) return true;
+    return false;
+  }
+
+  noise(pos, radius) {
+    if (radius <= 0) return;
+    this.noises.push({ pos: pos.clone(), radius, t: this.time });
+  }
+
+  update(dt) {
+    this.time += dt;
+    // noises live one frame for listeners; keep a short tail for debugging
+    this.noises = this.noises.filter((n) => this.time - n.t < 0.1);
+  }
+
+  // True if nothing solid is between a and b.
+  lineOfSight(a, b) {
+    _dir.subVectors(b, a);
+    const len = _dir.length();
+    if (len < 1e-4) return true;
+    _dir.divideScalar(len);
+    _ray.set(a, _dir);
+    for (const c of this.near(Math.min(a.x, b.x), Math.min(a.z, b.z), Math.max(a.x, b.x), Math.max(a.z, b.z))) {
+      if (_ray.intersectBox(c, _hitP) && _hitP.distanceTo(a) < len - 0.05) return false;
+    }
+    if (this.heightFn) {
+      const steps = Math.ceil(len / 1.5);
+      for (let i = 1; i < steps; i++) {
+        const t = i / steps;
+        const x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t, z = a.z + (b.z - a.z) * t;
+        if (y < this.heightFn(x, z) + 0.1) return false;
+      }
+    }
+    return true;
+  }
+
+  // Mark colliders the (huge) monster simply crashes through: anything shorter
+  // than the player or thinner than `thin` (crosses, trees, fences, pianos...).
+  markSmall(height = 1.8, thin = 1.0) {
+    for (const b of this.colliders) {
+      const g = this.heightFn ? this.heightFn((b.min.x + b.max.x) / 2, (b.min.z + b.max.z) / 2) : 0;
+      b.small = b.max.y - g < height || Math.max(b.max.x - b.min.x, b.max.z - b.min.z) < thin;
+    }
+  }
+
+  // ---------------------------------------------------------------- navigation grid
+  // Cells are blocked where a creature of `radius` would overlap an obstacle
+  // that sits between minH and maxH above the ground (it steps over lower ones).
+  buildNav(minX, minZ, maxX, maxZ, cell, radius, minH = 0.6, maxH = 2.4) {
+    const cols = Math.ceil((maxX - minX) / cell);
+    const rows = Math.ceil((maxZ - minZ) / cell);
+    const blocked = new Uint8Array(cols * rows);
+    const ground = new Float32Array(cols * rows);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        ground[r * cols + c] = this.heightFn ? this.heightFn(minX + (c + 0.5) * cell, minZ + (r + 0.5) * cell) : 0;
+      }
+    }
+    // rasterize each collider's expanded footprint (small ones don't block the monster)
+    for (const b of this.colliders) {
+      if (b.small) continue;
+      const c0 = Math.max(0, Math.ceil((b.min.x - radius - minX) / cell - 0.5));
+      const c1 = Math.min(cols - 1, Math.floor((b.max.x + radius - minX) / cell - 0.5));
+      const r0 = Math.max(0, Math.ceil((b.min.z - radius - minZ) / cell - 0.5));
+      const r1 = Math.min(rows - 1, Math.floor((b.max.z + radius - minZ) / cell - 0.5));
+      for (let r = r0; r <= r1; r++) {
+        for (let c = c0; c <= c1; c++) {
+          const i = r * cols + c;
+          if (blocked[i]) continue;
+          const g = ground[i];
+          if (b.max.y < g + minH || b.min.y > g + maxH) continue;
+          blocked[i] = 1;
+        }
+      }
+    }
+    this.nav = { minX, minZ, cell, cols, rows, blocked, radius };
+  }
+
+  _cellOf(x, z) {
+    const n = this.nav;
+    const c = Math.floor((x - n.minX) / n.cell), r = Math.floor((z - n.minZ) / n.cell);
+    return [Math.max(0, Math.min(n.cols - 1, c)), Math.max(0, Math.min(n.rows - 1, r))];
+  }
+
+  walkable(x, z) {
+    if (!this.nav) return true;
+    const n = this.nav;
+    const c = Math.floor((x - n.minX) / n.cell), r = Math.floor((z - n.minZ) / n.cell);
+    if (c < 0 || r < 0 || c >= n.cols || r >= n.rows) return false;
+    return !n.blocked[r * n.cols + c];
+  }
+
+  // Nearest walkable cell centre to (x,z) (spiral search).
+  nearestWalkable(x, z) {
+    const n = this.nav;
+    const [c0, r0] = this._cellOf(x, z);
+    for (let rad = 0; rad < 20; rad++) {
+      let best = null, bestD = Infinity;
+      for (let r = r0 - rad; r <= r0 + rad; r++) {
+        for (let c = c0 - rad; c <= c0 + rad; c++) {
+          if (Math.max(Math.abs(r - r0), Math.abs(c - c0)) !== rad) continue;
+          if (c < 0 || r < 0 || c >= n.cols || r >= n.rows || n.blocked[r * n.cols + c]) continue;
+          const cx = n.minX + (c + 0.5) * n.cell, cz = n.minZ + (r + 0.5) * n.cell;
+          const d = (cx - x) ** 2 + (cz - z) ** 2;
+          if (d < bestD) { bestD = d; best = new THREE.Vector3(cx, 0, cz); }
+        }
+      }
+      if (best) return best;
+    }
+    return new THREE.Vector3(x, 0, z);
+  }
+
+  // Walkable straight line on the grid (for path smoothing).
+  _clearLine(ax, az, bx, bz) {
+    const d = Math.hypot(bx - ax, bz - az);
+    const steps = Math.ceil(d / (this.nav.cell * 0.4));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      if (!this.walkable(ax + (bx - ax) * t, az + (bz - az) * t)) return false;
+    }
+    return true;
+  }
+
+  // A* on the grid. Returns an array of Vector3 waypoints (y = 0) or null.
+  findPath(from, to) {
+    const n = this.nav;
+    if (!n) return [to.clone()];
+    let start = this._cellOf(from.x, from.z);
+    if (n.blocked[start[1] * n.cols + start[0]]) {
+      const w = this.nearestWalkable(from.x, from.z);
+      start = this._cellOf(w.x, w.z);
+    }
+    let goalP = to;
+    if (!this.walkable(to.x, to.z)) goalP = this.nearestWalkable(to.x, to.z);
+    const goal = this._cellOf(goalP.x, goalP.z);
+    if (this._clearLine(from.x, from.z, goalP.x, goalP.z)) return [new THREE.Vector3(goalP.x, 0, goalP.z)];
+
+    const N = n.cols * n.rows;
+    const gScore = new Float32Array(N).fill(Infinity);
+    const came = new Int32Array(N).fill(-1);
+    const closed = new Uint8Array(N);
+    const open = []; // simple binary heap of [f, idx]
+    const push = (f, i) => {
+      open.push([f, i]);
+      let k = open.length - 1;
+      while (k > 0) { const p = (k - 1) >> 1; if (open[p][0] <= open[k][0]) break; [open[p], open[k]] = [open[k], open[p]]; k = p; }
+    };
+    const pop = () => {
+      const top = open[0], last = open.pop();
+      if (open.length) {
+        open[0] = last;
+        let k = 0;
+        for (;;) {
+          const l = 2 * k + 1, r = l + 1; let m = k;
+          if (l < open.length && open[l][0] < open[m][0]) m = l;
+          if (r < open.length && open[r][0] < open[m][0]) m = r;
+          if (m === k) break;
+          [open[m], open[k]] = [open[k], open[m]]; k = m;
+        }
+      }
+      return top;
+    };
+    const si = start[1] * n.cols + start[0], gi = goal[1] * n.cols + goal[0];
+    const h = (c, r) => { const dx = Math.abs(c - goal[0]), dz = Math.abs(r - goal[1]); return Math.max(dx, dz) + 0.414 * Math.min(dx, dz); };
+    gScore[si] = 0;
+    push(h(start[0], start[1]), si);
+    let found = false, iter = 0;
+    while (open.length && iter++ < 60000) {
+      const [, cur] = pop();
+      if (cur === gi) { found = true; break; }
+      if (closed[cur]) continue;
+      closed[cur] = 1;
+      const cc = cur % n.cols, cr = (cur / n.cols) | 0;
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dz) continue;
+          const nc = cc + dx, nr = cr + dz;
+          if (nc < 0 || nr < 0 || nc >= n.cols || nr >= n.rows) continue;
+          const ni = nr * n.cols + nc;
+          if (n.blocked[ni] || closed[ni]) continue;
+          if (dx && dz && (n.blocked[cr * n.cols + nc] || n.blocked[nr * n.cols + cc])) continue; // no corner cutting
+          const g = gScore[cur] + (dx && dz ? 1.414 : 1);
+          if (g < gScore[ni]) { gScore[ni] = g; came[ni] = cur; push(g + h(nc, nr), ni); }
+        }
+      }
+    }
+    if (!found) return null;
+
+    const cells = [];
+    for (let i = gi; i !== -1; i = came[i]) cells.push(i);
+    cells.reverse();
+    const pts = cells.map((i) => new THREE.Vector3(n.minX + ((i % n.cols) + 0.5) * n.cell, 0, n.minZ + (((i / n.cols) | 0) + 0.5) * n.cell));
+    pts[pts.length - 1].set(goalP.x, 0, goalP.z);
+    // string-pulling smoothing
+    const out = [];
+    let ax = from.x, az = from.z, k = 0;
+    while (k < pts.length) {
+      let far = k;
+      for (let j = pts.length - 1; j > k; j--) {
+        if (this._clearLine(ax, az, pts[j].x, pts[j].z)) { far = j; break; }
+      }
+      out.push(pts[far]);
+      ax = pts[far].x; az = pts[far].z;
+      k = far + 1;
+    }
+    return out;
+  }
+}

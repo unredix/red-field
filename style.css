@@ -1,0 +1,180 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  color: #ccc;
+  font-family: "Courier New", monospace;
+  user-select: none;
+}
+
+#game { display: block; width: 100%; height: 100%; }
+
+#vignette {
+  position: fixed; inset: 0; pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.55) 80%, rgba(0,0,0,0.9) 100%);
+}
+
+#grain {
+  position: fixed; inset: -50%; pointer-events: none;
+  opacity: 0.07;
+  mix-blend-mode: screen;
+}
+
+#hud { position: fixed; inset: 0; pointer-events: none; }
+
+#crosshair {
+  position: absolute; left: 50%; top: 50%;
+  width: 3px; height: 3px; margin: -1.5px 0 0 -1.5px;
+  background: rgba(255,255,255,0.35);
+  border-radius: 50%;
+}
+
+#stamina {
+  position: absolute; left: 50%; bottom: 40px;
+  width: 220px; height: 3px; margin-left: -110px;
+  background: rgba(255,255,255,0.08);
+  transition: opacity 0.6s;
+}
+#stamina-fill { height: 100%; width: 100%; background: rgba(220,220,210,0.6); }
+#stamina.exhausted #stamina-fill { background: rgba(170,40,30,0.8); }
+
+#debug {
+  position: absolute; left: 12px; top: 10px;
+  font-size: 12px; color: #8f8; text-shadow: 0 0 2px #000;
+  display: none;
+}
+
+#overlay, #death, #win {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.75);
+  cursor: pointer;
+}
+#overlay.hidden, #death.hidden, #win.hidden { display: none; }
+#win { background: rgba(12,4,24,0.85); }
+.panel .win-title { color: #b070ff; text-shadow: 0 0 16px #6020c0; }
+#death { background: rgba(10,0,0,0.35); z-index: 12; }
+
+.panel { text-align: center; max-width: 520px; padding: 24px; }
+.panel h1 { font-size: 34px; letter-spacing: 8px; color: #b33; margin-bottom: 12px; text-shadow: 0 0 12px #600; }
+.panel .click { margin-bottom: 20px; animation: pulse 2s infinite; }
+.panel table { margin: 0 auto 16px; border-collapse: collapse; font-size: 14px; }
+.panel td { padding: 3px 12px; text-align: left; }
+.panel td:first-child { color: #fff; text-align: right; }
+.panel .tips { font-size: 12px; color: #888; line-height: 1.6; }
+
+#chase {
+  position: fixed; inset: 0; pointer-events: none; opacity: 0;
+  background: radial-gradient(ellipse at center, transparent 55%, rgba(160,0,0,0.55) 100%);
+}
+#red { position: fixed; inset: 0; pointer-events: none; opacity: 0; background: rgba(120,0,0,0.92); }
+
+#timer {
+  position: absolute; left: 50%; top: 14px; transform: translateX(-50%);
+  font-size: 15px; letter-spacing: 3px; color: rgba(220,190,180,0.55);
+}
+#eye {
+  position: absolute; left: 50%; top: 40px; width: 34px; margin-left: -17px;
+  color: rgba(230,200,190,0.8); opacity: 0; transition: color 0.3s;
+}
+#eye.hunting { color: #e22; filter: drop-shadow(0 0 4px #f00); }
+
+.panel .goal { color: #d88; margin-bottom: 10px; }
+.panel .big { font-size: 22px; margin: 8px 0; color: #fff; }
+
+#towers {
+  position: absolute; left: 50%; top: 34px; transform: translateX(-50%);
+  font-size: 13px; letter-spacing: 3px; color: rgba(190,140,255,0.7);
+}
+#eye { top: 56px !important; }
+
+#toast {
+  position: absolute; left: 50%; top: 22%; transform: translateX(-50%);
+  font-size: 15px; letter-spacing: 1px; color: #e8d0ff; text-shadow: 0 0 8px #000, 0 0 4px #000;
+  opacity: 0; transition: opacity 0.6s; white-space: nowrap;
+}
+#toast.show { opacity: 1; }
+
+#charge {
+  position: absolute; left: 50%; top: 50%; width: 64px; height: 64px; margin: -32px 0 0 -32px;
+  opacity: 0; transition: opacity 0.3s;
+}
+#charge.show { opacity: 1; }
+#charge svg { width: 64px; height: 64px; transform: rotate(-90deg); }
+#charge circle { fill: none; stroke-width: 3; }
+#charge .track { stroke: rgba(255,255,255,0.12); }
+#charge-ring { stroke: #b060ff; stroke-dasharray: 163.4; stroke-dashoffset: 163.4; filter: drop-shadow(0 0 3px #8030ff); }
+#charge-label {
+  position: absolute; top: 74px; left: 50%; transform: translateX(-50%);
+  white-space: nowrap; font-size: 13px; color: #d8b8ff; text-shadow: 0 0 4px #000;
+}
+
+/* cinematics */
+#letterbox .bar {
+  position: fixed; left: 0; right: 0; height: 0; background: #000; z-index: 5;
+  transition: height 0.6s ease; pointer-events: none;
+}
+#letterbox .top { top: 0; }
+#letterbox .bottom { bottom: 0; display: flex; align-items: center; justify-content: flex-end; }
+#letterbox .skip { color: #555; font-size: 12px; margin-right: 18px; opacity: 0; transition: opacity 0.6s; }
+body.cinematic #letterbox .bar { height: 11vh; }
+body.cinematic #letterbox .skip { opacity: 1; }
+body.cinematic #hud, body.cinematic #chase { display: none; }
+
+#caption {
+  position: fixed; left: 0; right: 0; bottom: 15vh; text-align: center; z-index: 6;
+  font-size: 20px; letter-spacing: 3px; color: #e0c8c0; text-shadow: 0 0 10px #000;
+  opacity: 0; pointer-events: none;
+}
+#caption.show { animation: caption 3.6s ease forwards; }
+#caption.title { bottom: 44vh; font-size: 54px; letter-spacing: 16px; color: #c02020; text-shadow: 0 0 24px #600; }
+@keyframes caption { 0% { opacity: 0; } 15% { opacity: 1; } 80% { opacity: 1; } 100% { opacity: 0; } }
+
+#fade { position: fixed; inset: 0; background: #000; opacity: 0; pointer-events: none; z-index: 7; }
+#fade.go { animation: fadein 0.9s ease; }
+@keyframes fadein { 0% { opacity: 1; } 100% { opacity: 0; } }
+
+/* left-click hint for the tower melody */
+#lmb {
+  position: absolute; left: 50%; top: calc(50% + 72px); transform: translateX(-50%);
+  display: flex; align-items: center; gap: 8px; color: #d8b8ff; font-size: 13px;
+  text-shadow: 0 0 4px #000; opacity: 0; transition: opacity 0.3s; white-space: nowrap;
+}
+#lmb.show { opacity: 1; }
+#lmb svg { width: 20px; height: 28px; filter: drop-shadow(0 0 3px #000); }
+#lmb .btn { fill: #b060ff; }
+#lmb.aimed svg { animation: lmbPulse 0.5s ease-in-out infinite alternate; }
+#lmb.aimed .btn { fill: #e0c0ff; }
+@keyframes lmbPulse { from { transform: scale(1); } to { transform: scale(1.2); } }
+#charge.melody #charge-label { top: 104px; }
+
+/* death jumpscare */
+#blackout { position: fixed; inset: 0; background: #000; opacity: 0; pointer-events: none; z-index: 9; }
+#blackout.on { opacity: 1; }
+#blood { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; opacity: 0; }
+#blood.show { opacity: 1; }
+#jaws { position: fixed; inset: 0; pointer-events: none; z-index: 11; overflow: hidden; opacity: 0; }
+#jaws.on { opacity: 1; }
+#jaws.fade { opacity: 0; transition: opacity 0.5s; }
+#jaws .row { position: absolute; left: -2%; width: 104%; height: 56%; transition: transform 0.09s cubic-bezier(.6,0,1,.6); }
+#jaws .row svg { width: 100%; height: 100%; display: block; }
+#jaws .top { top: 0; transform: translateY(-102%); }
+#jaws .bottom { bottom: 0; transform: translateY(102%); }
+#jaws.bite .top, #jaws.bite .bottom { transform: translateY(0); }
+#game.distort { filter: contrast(1.35) saturate(1.9); }
+
+/* glitchy title on the death screen */
+.glitch { position: relative; animation: glitchShake 0.25s steps(2) infinite; }
+.glitch::before, .glitch::after {
+  content: attr(data-text); position: absolute; left: 0; right: 0; top: 0; opacity: 0.8;
+}
+.glitch::before { color: #f22; transform: translate(-3px, 0); clip-path: inset(0 0 55% 0); animation: glitchA 0.6s steps(3) infinite; }
+.glitch::after { color: #3cf; transform: translate(3px, 0); clip-path: inset(50% 0 0 0); animation: glitchB 0.45s steps(3) infinite; }
+@keyframes glitchShake { 0% { transform: translate(0, 0); } 50% { transform: translate(1px, -1px); } 100% { transform: translate(-1px, 1px); } }
+@keyframes glitchA { 0% { clip-path: inset(0 0 60% 0); } 33% { clip-path: inset(20% 0 40% 0); } 66% { clip-path: inset(5% 0 80% 0); } 100% { clip-path: inset(40% 0 30% 0); } }
+@keyframes glitchB { 0% { clip-path: inset(55% 0 0 0); } 33% { clip-path: inset(70% 0 10% 0); } 66% { clip-path: inset(45% 0 30% 0); } 100% { clip-path: inset(80% 0 0 0); } }
+
+@keyframes pulse { 50% { opacity: 0.35; } }

@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Red Field</title>
+  <link rel="stylesheet" href="style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <!-- screen overlays -->
+  <div id="vignette"></div>
+  <div id="chase"></div>
+  <div id="red"></div>
+  <div id="grain"></div>
+  <div id="fade"></div>
+  <!-- death jumpscare layers -->
+  <div id="blackout"></div>
+  <canvas id="blood"></canvas>
+  <div id="jaws"><div class="row top"></div><div class="row bottom"></div></div>
+
+  <!-- cinematic letterbox + captions -->
+  <div id="letterbox"><div class="bar top"></div><div class="bar bottom"><span class="skip">Space to skip</span></div></div>
+  <div id="caption"></div>
+
+  <!-- HUD -->
+  <div id="hud">
+    <div id="timer">0:00</div>
+    <div id="towers">&#10022; 0/3</div>
+    <div id="toast"></div>
+    <div id="charge">
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+        <circle cx="32" cy="32" r="26" class="track" />
+        <circle cx="32" cy="32" r="26" id="charge-ring" />
+      </svg>
+      <div id="charge-label"></div>
+    </div>
+    <div id="lmb">
+      <svg viewBox="0 0 24 34" aria-hidden="true">
+        <rect x="1.5" y="1.5" width="21" height="31" rx="10.5" fill="none" stroke="currentColor" stroke-width="2" />
+        <path d="M12 1.5 A10.5 10.5 0 0 0 1.5 12 V14 H12 Z" class="btn" />
+        <line x1="12" y1="1.5" x2="12" y2="14" stroke="currentColor" stroke-width="1.5" />
+        <line x1="1.5" y1="14" x2="22.5" y2="14" stroke="currentColor" stroke-width="1.5" />
+      </svg>
+      <span>Strike the stones in order</span>
+    </div>
+    <svg id="eye" viewBox="0 0 64 32" aria-hidden="true">
+      <path d="M2 16 Q32 -8 62 16 Q32 40 2 16 Z" fill="none" stroke="currentColor" stroke-width="2.5" />
+      <circle cx="32" cy="16" r="7" fill="currentColor" />
+    </svg>
+    <div id="crosshair"></div>
+    <div id="stamina"><div id="stamina-fill"></div></div>
+    <pre id="debug"></pre>
+  </div>
+
+  <!-- Start / pause screen -->
+  <div id="overlay">
+    <div class="panel">
+      <h1>RED FIELD</h1>
+      <p class="goal">Wake the three towers to destroy the beast. It hunts the light, and your scent.</p>
+      <p class="click">Click to start</p>
+      <table>
+        <tr><td>W A S D</td><td>Move</td></tr>
+        <tr><td>Shift</td><td>Sprint (loud)</td></tr>
+        <tr><td>Space</td><td>Jump / wall jump</td></tr>
+        <tr><td>Hold C</td><td>Hide: you stop and your flashlight goes dark. Best in tall grass</td></tr>
+        <tr><td>Left click</td><td>Claw slash: stuns up close. Parry its lunge</td></tr>
+        <tr><td>Right click</td><td>Throw a lure. It chases the light</td></tr>
+        <tr><td>Esc</td><td>Pause</td></tr>
+      </table>
+      <p class="tips">
+        The arm's veins show your claw charges and pulse faster when it's near.<br />
+        When its eyes flare and the cymbal crashes, get out of the way or slash.<br />
+        If you hear it sniffing, it's on your trail. Wade through blood to wash your scent away.<br />
+        Towers: stand in the rune circle to charge, then strike the stones in the order they sing.
+      </p>
+    </div>
+  </div>
+
+  <!-- Death screen -->
+  <div id="death" class="hidden">
+    <div class="panel">
+      <h1 class="glitch" data-text="DEVOURED">DEVOURED</h1>
+      <p class="big">You survived <span id="death-time">0:00</span></p>
+      <p>Best: <span id="death-best">0:00</span></p>
+      <p id="death-towers"></p>
+      <p class="click">Click to try again</p>
+    </div>
+  </div>
+
+  <!-- Win screen -->
+  <div id="win" class="hidden">
+    <div class="panel">
+      <h1 class="win-title">SILENCE</h1>
+      <p class="big">The towers sang the beast to death in <span id="win-time">0:00</span></p>
+      <p>Fastest: <span id="win-best">0:00</span></p>
+      <p class="click">Click to play again</p>
+    </div>
+  </div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
