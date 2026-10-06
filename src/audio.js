@@ -173,6 +173,32 @@ export class Sfx {
     this._noise(t, 0.1, ng);
   }
 
+  // Bright "ting" when the parry window opens (its eyes flash white).
+  parryCue(pos) {
+    if (!this.ready) return;
+    const t = this.now, out = this._out(pos, 10);
+    const g = this.ctx.createGain(); g.connect(out);
+    this._env(g, t, 0.002, 0.4, 0.35);
+    for (const f of [2637, 3951, 5274]) this._osc('sine', f, t, 0.4, g);
+  }
+
+  // Heavy hit for a successful parry: sub thump + ringing metal + crack.
+  parryImpact() {
+    if (!this.ready) return;
+    const t = this.now;
+    const sub = this.ctx.createGain(); sub.connect(this.master);
+    this._env(sub, t, 0.003, 1.1, 0.6);
+    const o = this._osc('sine', 95, t, 0.65, sub);
+    o.frequency.exponentialRampToValueAtTime(32, t + 0.5);
+    const ring = this.ctx.createGain(); ring.connect(this.master);
+    this._env(ring, t + 0.02, 0.002, 0.3, 2.2);
+    for (const f of [880, 1318, 1975, 2960]) this._osc('triangle', f, t + 0.02, 2.3, ring);
+    const crack = this.ctx.createGain(); crack.connect(this.master);
+    this._env(crack, t, 0.001, 0.7, 0.12);
+    const hp = this.ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1800; hp.connect(crack);
+    this._noise(t, 0.15, hp);
+  }
+
   bite() {
     if (!this.ready) return;
     const t = this.now;

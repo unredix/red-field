@@ -33,10 +33,10 @@ export function makeGuitar(bodyMat, neckMat, scale = 1) {
 }
 
 export class PropKit {
-  constructor(scene, world) {
+  constructor(scene, world, seed = 42) {
     this.scene = scene;
     this.world = world;
-    this.rnd = mulberry32(42);
+    this.rnd = mulberry32(seed);
 
     const wood = woodTexture();
     const rock = rockTexture();

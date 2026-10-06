@@ -3,7 +3,7 @@ import { ACTIONS, DEFAULT_BINDS, QUALITY, keyLabel, saveSettings } from './setti
 // Start / pause screen and the settings panel (graphics, HUD toggles, key bindings).
 // Game-side effects go through onChange(key) so this file only touches the DOM.
 export class Menu {
-  constructor({ settings, input, onChange, onRestart, onIntro, antialiasNow }) {
+  constructor({ settings, input, onChange, onRestart, onIntro, antialiasNow, map, seed, onMap, newSeed }) {
     this.s = settings;
     this.input = input;
     this.onChange = onChange;
@@ -18,6 +18,25 @@ export class Menu {
     };
     this.settingsOpen = false;
     this.mode = 'start';
+
+    // map choice: switching map or seed reloads the page with the new level
+    this.map = map;
+    this.seed = seed;
+    for (const b of $('set-map').querySelectorAll('button')) {
+      b.classList.toggle('on', b.dataset.map === map);
+      b.addEventListener('click', () => {
+        if (b.dataset.map === this.map) return;
+        onMap(b.dataset.map, b.dataset.map === 'random' ? newSeed() : 0);
+      });
+    }
+    $('seed-row').classList.toggle('hidden', map !== 'random');
+    $('seed-label').textContent = `Seed ${seed}`;
+    $('btn-new-seed').addEventListener('click', () => onMap('random', newSeed()));
+    $('btn-copy-seed').addEventListener('click', () => {
+      const url = `${location.origin}${location.pathname}?map=random&seed=${seed}`;
+      navigator.clipboard?.writeText(url).then(() => { $('btn-copy-seed').textContent = 'Copied ✓'; }, () => { $('btn-copy-seed').textContent = url; });
+    });
+    this.el.mapNote = $('map-note');
 
     this.el.restart.addEventListener('click', () => onRestart());
     this.el.intro.addEventListener('click', () => onIntro());
@@ -56,6 +75,7 @@ export class Menu {
     this.el.title.textContent = pause ? 'PAUSED' : 'RED FIELD';
     this.el.click.textContent = pause ? 'Click to resume' : 'Click to start';
     this.el.restart.classList.toggle('hidden', !pause);
+    this.el.mapNote.textContent = pause ? 'Changing the map restarts the run.' : '';
     this.el.intro.classList.toggle('hidden', pause || !introSeen);
   }
 

@@ -50,6 +50,10 @@ export const MONSTER_CONFIG = {
 
   stunTime: 2.5,
   parryStunTime: 4,
+  parryWindow: 0.25,      // s at the END of the windup when a slash is a parry
+  parryGrace: 0.06,       // ...and this long into the lunge
+  knockDist: 1.5,         // parry shoves it back this far
+  knockTime: 0.22,
   enragedTime: 10,
   slashRange: 4.5,
   lureRange: 50,
@@ -137,6 +141,10 @@ export class Monster {
     this.headPitch = 0;
     this.headYaw = 0;
     this.eyeBoost = 0;
+    this.knock = this.knock || new THREE.Vector3();
+    this.knockT = 0;
+    this.recoil = 0;
+    this.parryCueOn = false;
     this.lure = null;
     this._setGoal(this.pos);
     this.model.eyeLight.color.setHex(0xff2010);
@@ -280,6 +288,12 @@ export class Monster {
     const x0 = this.pos.x, z0 = this.pos.z;
     this.pos.x += f.x * this.speed * dt;
     this.pos.z += f.z * this.speed * dt;
+    if (this.knockT > 0) { // linear decay that integrates to knockDist
+      const v = (2 * C.knockDist / C.knockTime) * (this.knockT / C.knockTime);
+      this.pos.x += this.knock.x * v * dt;
+      this.pos.z += this.knock.z * v * dt;
+      this.knockT -= dt;
+    }
     // push out of static obstacles (circle vs box in XZ)
     const r = C.radius;
     const g = this.pos.y;
@@ -369,6 +383,13 @@ export class Monster {
   }
 
   // ---------------------------------------------------------------- abilities used by the player
+  // True while a slash would be a parry: the last moment of the windup and the start of the lunge.
+  get parryOpen() {
+    if (this.state !== 'ATTACK') return false;
+    if (this.attackPhase === 'windup') return this.stateT >= C.windup - C.parryWindow;
+    return this.attackPhase === 'lunge' && this.stateT <= C.parryGrace;
+  }
+
   // Returns 'parry' | 'stun' | null
   receiveSlash(origin, dir) {
     if (this.state === 'STUNNED') return null;
@@ -378,7 +399,12 @@ export class Monster {
     // also allow hitting the chest when very close
     const bodyD = Math.hypot(this.pos.x - origin.x, this.pos.z - origin.z);
     if ((d > C.slashRange || toHead.dot(dir) / d < 0.5) && bodyD > 3.2) return null;
-    const parry = this.state === 'ATTACK' && this.attackPhase === 'windup';
+    const parry = this.parryOpen;
+    if (parry) { // shoved back, head snaps up
+      this.knock.set(this.pos.x - origin.x, 0, this.pos.z - origin.z).normalize();
+      this.knockT = C.knockTime;
+      this.recoil = 1;
+    }
     this._setState('STUNNED');
     this.stunT = parry ? C.parryStunTime : C.stunTime;
     this.attackPhase = null;
@@ -549,6 +575,7 @@ export class Monster {
   _startAttack(player) {
     this._setState('ATTACK');
     this.attackPhase = 'windup';
+    this.parryCueOn = false;
     // rear up on the hind legs for targets standing on rocks
     this.rear = player ? Math.min(Math.max((player.pos.y - this.pos.y - 1.0) / 3, 0), 1) : 0;
     this.onCymbal?.(this.pos);
@@ -560,6 +587,7 @@ export class Monster {
     if (this.attackPhase === 'windup') {
       this.speed = damp(this.speed, 0, 12, dt);
       if (t < C.windup * C.windupTrack) this._steer(player.pos.x, player.pos.z, 0, dt, 2.2); // then commits to a direction
+      if (t >= C.windup - C.parryWindow && !this.parryCueOn) { this.parryCueOn = true; this.onParryCue?.(this.pos); }
       if (t >= C.windup) { this.attackPhase = 'lunge'; this.stateT = 0; }
     } else if (this.attackPhase === 'lunge') {
       this.speed = C.lungeSpeed;
@@ -615,6 +643,15 @@ export class Monster {
     const f = this.rig.feet;
     f[0].pair = 0; f[3].pair = 0; f[1].pair = 1; f[2].pair = 1;
     this._buildDust();
+    // parry-window glints (sprites, so no light-count change)
+    const gm = new THREE.SpriteMaterial({ map: glowTexture('rgba(255,255,255,1)', 'rgba(255,240,220,0)'), blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
+    this.glints = this.model.eyes.map((e) => {
+      const g = new THREE.Sprite(gm);
+      g.position.copy(e.position);
+      g.visible = false;
+      e.parent.add(g);
+      return g;
+    });
   }
 
   // ---- dust puffs (one Points object, pooled)
@@ -827,7 +864,8 @@ export class Monster {
     }
     if (st === 'TEAR') { jaw = 0.5 + Math.sin(t * 14) * 0.45; hp = 0.5; }
     if (st === 'TRACK') { hp = 0.45 + Math.sin(t * 9) * 0.05; jaw = 0.12; }
-    if (stunned) { jaw = 0.7; hp = 0.45 + Math.sin(t * 5) * 0.1; eye = -0.7; headRoll = Math.sin(t * 5) * 0.12; }
+    if (stunned) { jaw = 0.7; hp = 0.45 + Math.sin(t * 5) * 0.1 - this.recoil * 1.1; eye = -0.7; headRoll = Math.sin(t * 5) * 0.12; }
+    this.recoil = Math.max(0, this.recoil - dt * 2.5);
     if (idle?.type === 'sniff') { hp = -0.45 * idleEnv + Math.sin(t * 22) * 0.04 * idleEnv; }
     if (idle?.type === 'listen') { headRoll = 0.32 * idle.side * idleEnv; yawExtra = 0.5 * idle.side * idleEnv; }
     if (this.litT > 0) eye = Math.max(eye, 0.8);
@@ -880,8 +918,13 @@ export class Monster {
       for (const e of m.eyes) e.scale.setScalar(0.55 * Math.min(eyeK, 2));
     } else {
       const eyeK = 1 + this.eyeBoost;
-      m.eyeLight.intensity = 1.5 * Math.max(0.2, eyeK);
+      const open = this.parryOpen;
+      m.eyeLight.color.setHex(open ? 0xfff0e0 : 0xff2010);
+      m.eyeLight.intensity = open ? 9 : 1.5 * Math.max(0.2, eyeK);
       for (const e of m.eyes) e.scale.setScalar(0.55 * Math.max(0.3, Math.min(eyeK, 2.2)));
+      // white-hot glints over the eyes = parry window
+      const gk = open ? 1 + Math.sin(t * 60) * 0.15 : 0;
+      for (const g of this.glints) { g.visible = open; g.scale.setScalar(1.3 * gk); }
     }
     // glowing seams pulse with its heartbeat (faster when it's hunting)
     const beat = Math.pow(Math.max(0, Math.sin(t * (2.2 + this.awareness * 3))), 8);

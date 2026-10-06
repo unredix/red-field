@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import { PropKit } from '../props.js';
-import { mudTexture, glowTexture } from '../textures.js';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { buildTerrain, buildBackdrop, buildEmbers } from './common.js';
 
 // The Red Field (maps.png). 140 x 140 m, walled by rocks.
 //   centre     blood pool, shed, piano, crosses (the original small map)
@@ -68,179 +67,16 @@ function heightFn(x, z) {
   return h;
 }
 
-function buildTerrain(scene) {
-  const size = HALF * 2 + 90, seg = 190;
-  const geo = new THREE.PlaneGeometry(size, size, seg, seg);
-  geo.rotateX(-Math.PI / 2);
-  const p = geo.attributes.position;
-  const colors = new Float32Array(p.count * 3);
-  const c = new THREE.Color();
-  const pathC = new THREE.Color(0.55, 0.36, 0.3);
-  const bloodC = new THREE.Color(0.55, 0.12, 0.1);
-  const stoneC = new THREE.Color(0.5, 0.36, 0.34);
-  for (let i = 0; i < p.count; i++) {
-    const x = p.getX(i), z = p.getZ(i);
-    p.setY(i, heightFn(x, z));
-    const n = 0.5 + 0.5 * Math.sin(x * 0.7 + Math.sin(z * 0.5) * 2) * Math.cos(z * 0.6);
-    c.setRGB(0.95 + n * 0.25, 0.32 + n * 0.08, 0.3); // reddish field
-    c.lerp(pathC, 1 - smooth(1.2, 2.8, pathDist(x, z)));
-    for (const pl of [POOL, POOL2]) c.lerp(bloodC, (1 - smooth(4, 9, Math.hypot(x - pl.x, z - pl.z))) * 0.7);
-    c.lerp(stoneC, (1 - smooth(8, 14, Math.hypot(x - CHAPEL.x, z - CHAPEL.z))) * 0.6); // chapel yard
-    colors.set([c.r, c.g, c.b], i * 3);
-  }
-  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geo.computeVertexNormals();
-  const tex = mudTexture();
-  tex.repeat.set(size / 4, size / 4);
-  const mat = new THREE.MeshStandardMaterial({ map: tex, bumpMap: tex, bumpScale: 2.5, vertexColors: true, roughness: 0.92 });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.receiveShadow = true;
-  mesh.matrixAutoUpdate = false;
-  scene.add(mesh);
-}
-
-// Tileable fbm noise baked once into a texture (much cheaper than per-pixel noise).
-function cloudTexture(size = 256) {
-  const period = 8;
-  const lattice = Array.from({ length: 5 }, () => Float32Array.from({ length: 128 * 128 }, Math.random));
-  const vnoise = (x, y, oct) => {
-    const p = period << oct, L = lattice[oct];
-    const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
-    const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
-    const at = (a, b) => L[((a % p + p) % p) * 128 + ((b % p + p) % p)];
-    return (at(xi, yi) * (1 - u) + at(xi + 1, yi) * u) * (1 - v) + (at(xi, yi + 1) * (1 - u) + at(xi + 1, yi + 1) * u) * v;
-  };
-  const data = new Uint8Array(size * size * 4);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      let n = 0, a = 0.5;
-      for (let o = 0; o < 5; o++) {
-        const f = (period << o) / size;
-        n += a * vnoise(x * f, y * f, o);
-        a *= 0.5;
-      }
-      const i = (y * size + x) * 4;
-      data[i] = data[i + 1] = data[i + 2] = Math.min(255, n * 255); data[i + 3] = 255;
-    }
-  }
-  const tex = new THREE.DataTexture(data, size, size);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.magFilter = THREE.LinearFilter;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
-  tex.generateMipmaps = true;
-  tex.needsUpdate = true;
-  return tex;
-}
-
-// Sky + castle form a "backdrop" that follows the camera and is drawn first
-// without depth test, so the camera far plane can stay short (fog hides the rest).
-function buildBackdrop(scene) {
-  const backdrop = new THREE.Group();
-  const skyMat = new THREE.ShaderMaterial({
-    side: THREE.BackSide,
-    depthWrite: false,
-    depthTest: false,
-    fog: false,
-    uniforms: { uTime: { value: 0 }, uFog: { value: scene.fog.color }, uClouds: { value: cloudTexture() } },
-    vertexShader: `
-      varying vec3 vDir;
-      void main() {
-        vDir = normalize(position);
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }`,
-    fragmentShader: `
-      uniform float uTime;
-      uniform vec3 uFog;
-      uniform sampler2D uClouds;
-      varying vec3 vDir;
-      void main() {
-        float y = vDir.y;
-        vec3 horizon = vec3(0.16, 0.012, 0.008);
-        vec3 low = vec3(0.035, 0.003, 0.002);
-        vec3 top = vec3(0.004, 0.0, 0.0);
-        vec3 col = mix(horizon, low, smoothstep(0.0, 0.14, y));
-        col = mix(col, top, smoothstep(0.14, 0.6, y));
-        vec2 uv = vDir.xz / (y + 0.18) * 1.2 + vec2(uTime * 0.012, uTime * 0.005);
-        float c = texture2D(uClouds, uv * 0.12).r * 0.75 + texture2D(uClouds, uv * 0.37 + 0.3).r * 0.25;
-        float cl = smoothstep(0.42, 0.78, c);
-        vec3 lit = mix(vec3(0.003, 0.0, 0.0), vec3(0.09, 0.008, 0.006), smoothstep(0.35, 0.0, y));
-        col = mix(col, lit * (0.5 + c), cl * smoothstep(-0.02, 0.08, y));
-        col = mix(uFog, col, smoothstep(-0.08, 0.02, y));
-        gl_FragColor = vec4(col, 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }`,
-  });
-  const dome = new THREE.Mesh(new THREE.SphereGeometry(90, 32, 16), skyMat);
-  dome.renderOrder = -3;
-  dome.frustumCulled = false;
-  backdrop.add(dome);
-
-  // castle silhouette (scaled down and moved in so it fits inside the dome)
-  const dark = new THREE.MeshBasicMaterial({ color: 0x030000, fog: false, depthTest: false, depthWrite: false });
-  const castle = new THREE.Group();
-  const towers = [[0, 55, 7], [-14, 38, 5], [13, 42, 5], [-24, 26, 4], [24, 30, 4], [-7, 46, 4], [7, 49, 4]];
-  const parts = [];
-  for (const [x, h, r] of towers) {
-    const t = new THREE.CylinderGeometry(r * 0.8, r, h, 8); t.translate(x, h / 2, 0); parts.push(t);
-    const sp = new THREE.ConeGeometry(r * 0.9, h * 0.45, 8); sp.translate(x, h + h * 0.22, 0); parts.push(sp);
-  }
-  const base = new THREE.BoxGeometry(60, 18, 20); base.translate(0, 9, 0);
-  parts.push(base);
-  castle.add(new THREE.Mesh(mergeGeometries(parts.map((g) => g.toNonIndexed()), false), dark));
-  const red = new THREE.MeshBasicMaterial({ color: new THREE.Color(3, 0.15, 0.08), fog: false, depthTest: false, depthWrite: false });
-  const cy = 55 + 55 * 0.45 + 6;
-  const vGeo = new THREE.BoxGeometry(1.2, 14, 1.2); vGeo.translate(0, cy, 0);
-  const hGeo = new THREE.BoxGeometry(8, 1.2, 1.2); hGeo.translate(0, cy + 3, 0);
-  const v = new THREE.Mesh(mergeGeometries([vGeo, hGeo], false), red);
-  const glow = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: glowTexture('rgba(255,40,20,0.9)', 'rgba(255,0,0,0)'), blending: THREE.AdditiveBlending, fog: false, depthWrite: false,
-  }));
-  glow.scale.set(60, 60, 1);
-  glow.position.set(0, cy, 2);
-  castle.add(v, glow);
-  castle.traverse((o) => { if (o.isMesh) { o.renderOrder = o.material === red ? -1 : -2; o.frustumCulled = false; } });
-  castle.scale.setScalar(0.55);
-  castle.position.set(-6, -12, -84);
-  backdrop.add(castle);
-  scene.add(backdrop);
-  return { backdrop, skyMat };
-}
-
-function buildEmbers(scene) {
-  const N = 450;
-  const pos = new Float32Array(N * 3);
-  const spd = new Float32Array(N);
-  for (let i = 0; i < N; i++) {
-    pos.set([(Math.random() - 0.5) * 60, Math.random() * 18, (Math.random() - 0.5) * 60], i * 3);
-    spd[i] = 0.3 + Math.random() * 0.9;
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  const mat = new THREE.PointsMaterial({
-    size: 0.09, map: glowTexture('rgba(255,120,60,1)', 'rgba(255,20,0,0)'), color: 0xff5530,
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-  });
-  const pts = new THREE.Points(geo, mat);
-  pts.frustumCulled = false;
-  scene.add(pts);
-  return {
-    update(dt, time, cam) {
-      const a = geo.attributes.position;
-      for (let i = 0; i < N; i++) {
-        let x = a.getX(i), y = a.getY(i), z = a.getZ(i);
-        y += spd[i] * dt;
-        x += Math.sin(time * 0.7 + i) * 0.3 * dt + 0.25 * dt;
-        z += Math.cos(time * 0.5 + i * 1.3) * 0.3 * dt;
-        if (x - cam.x > 30) x -= 60; else if (x - cam.x < -30) x += 60;
-        if (z - cam.z > 30) z -= 60; else if (z - cam.z < -30) z += 60;
-        if (y - cam.y > 14) y -= 18;
-        if (y - cam.y < -4) y += 18;
-        a.setXYZ(i, x, y, z);
-      }
-      a.needsUpdate = true;
-    },
-  };
+// ground colour: reddish field, mud paths, blood around the pools, stone in the chapel yard
+const PATH_C = new THREE.Color(0.55, 0.36, 0.3);
+const BLOOD_C = new THREE.Color(0.55, 0.12, 0.1);
+const STONE_C = new THREE.Color(0.5, 0.36, 0.34);
+function groundColor(x, z, c) {
+  const n = 0.5 + 0.5 * Math.sin(x * 0.7 + Math.sin(z * 0.5) * 2) * Math.cos(z * 0.6);
+  c.setRGB(0.95 + n * 0.25, 0.32 + n * 0.08, 0.3); // reddish field
+  c.lerp(PATH_C, 1 - smooth(1.2, 2.8, pathDist(x, z)));
+  for (const pl of [POOL, POOL2]) c.lerp(BLOOD_C, (1 - smooth(4, 9, Math.hypot(x - pl.x, z - pl.z))) * 0.7);
+  c.lerp(STONE_C, (1 - smooth(8, 14, Math.hypot(x - CHAPEL.x, z - CHAPEL.z))) * 0.6); // chapel yard
 }
 
 export function buildRedField(scene, world) {
@@ -249,7 +85,7 @@ export function buildRedField(scene, world) {
   scene.background = new THREE.Color(0x1c0404);
   scene.add(new THREE.HemisphereLight(0x8a1a14, 0x1a0505, 0.55));
 
-  buildTerrain(scene);
+  buildTerrain(scene, HALF, heightFn, groundColor);
   const { backdrop, skyMat } = buildBackdrop(scene);
   const embers = buildEmbers(scene);
 

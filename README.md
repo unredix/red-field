@@ -18,6 +18,21 @@ python serve.py 8080
 
 then open http://localhost:8080 and click. `?map=test` loads the old movement test map (no monster).
 
+## Maps
+
+Pick the map on the start / pause screen:
+
+- **Red Field (classic):** the hand-made map, unchanged (also tagged `classic-map-v1` in git).
+- **Random:** a seeded generated map (`src/maps/generated.js`), the same 140 × 140 m size and prop budget:
+  - spawn on an edge, 3 towers spread far apart, the monster far from you;
+  - 1–2 blood pools (always at least one for washing your scent);
+  - 3 random landmarks from: chapel graveyard, orchestra clearing, dead forest, boulder canyon, junkyard (`src/maps/landmarks.js`);
+  - mud paths linking everything, rolling terrain, tall-grass hiding patches.
+  - **Seeds:** the same seed always gives the same map. **New seed** or **N** on the death / win screen rolls a new one; **Copy link** shares it (`?map=random&seed=123`).
+  - Every map is checked at load: if the monster couldn't reach a tower or your spawn, the next seed is used.
+
+Best times are saved separately for classic and random maps.
+
 ## Controls
 
 | Input | Action |
@@ -25,7 +40,7 @@ then open http://localhost:8080 and click. `?map=test` loads the old movement te
 | WASD / Shift | Move / sprint (sprinting is loud) |
 | Space | Jump · wall jump |
 | Hold C | **Hide**: you crouch and freeze, and your flashlight goes dark. The light is on whenever you move. Hide in tall grass to be nearly invisible. |
-| Left click | **Claw slash**: stuns the monster up close; during its lunge windup it's a **parry** (longer stun) |
+| Left click | **Claw slash**: stuns the monster up close. Time it to **parry** its lunge (see Attack) |
 | Right click | **Lure**: throws a glowing orb the monster chases and destroys |
 | F3 | Debug overlay (monster state, awareness) |
 | Esc | Pause: resume, restart (R), settings |
@@ -86,7 +101,9 @@ The monster is 1.5× the original size.
 
 **States:** WANDER → INVESTIGATE → CHASE → SEARCH → TRACK (smell), plus LURED / TEAR, ATTACK and STUNNED.
 
-**Attack:** a 0.6 s windup (eyes flare, cymbal crash), then a lunge. One bite kills. Dodge by sidestepping or backing off, or slash to parry. It **rears up to bite players up to 6.5 m above its feet**, so rocks and speaker stacks aren't safe.
+**Attack:** a 0.6 s windup (eyes flare, cymbal crash), then a lunge. One bite kills. Dodge by sidestepping or backing off, or parry.
+
+**Parry:** its eyes flash **white** (with a bright *ting*) for the last 0.25 s of the windup; a claw hit landing then, or in the first 0.06 s of the lunge, is a parry. You get impact frames (a 0.13 s freeze, white flash, camera punch, sparks), the beast is knocked back about 1.5 m and stunned for 4 s. Slashing earlier only gives a normal 2.5 s stun (tune `parryWindow` / `parryGrace` in `MONSTER_CONFIG`). It **rears up to bite players up to 6.5 m above its feet**, so rocks and speaker stacks aren't safe.
 
 **Speed:** chase speed ramps from 7.8 m/s (just under your 8.2 m/s sprint) to 10.5 m/s over 5 minutes.
 
@@ -109,7 +126,10 @@ The monster is 1.5× the original size.
 - `src/audio.js`: WebAudio synthesized sounds.
   - Monster: drum-hit footsteps, a guitar-chord roar and a cymbal crash on attack.
   - Player: a heartbeat and ambient sound.
-- `src/maps/redfield.js`: the 140 × 140 m map.
+- `src/maps/redfield.js`: the classic 140 × 140 m map.
+- `src/maps/generated.js`, `src/maps/landmarks.js`: the seeded random map and its set pieces.
+- `src/maps/common.js`: terrain, sky, embers, path and placement helpers shared by both.
+- `src/fx.js`: pooled spark bursts.
   - **Centre:** the blood pool, the shed and the piano.
   - **North:** a fenced graveyard with a ruined chapel. Its big front door fits the monster, its back door doesn't, and you can vault through its windows.
   - **East:** a dead forest with hanging dolls.
@@ -134,6 +154,7 @@ The monster is 1.5× the original size.
 - **Static props** are merged per 35 m chunk and per material. Untextured materials are folded into one vertex-coloured material. Chunks deep in the fog are hidden.
 - **Grass and plants** are instanced in spatial chunks, with frustum and distance culling.
 - **Monster:** its rigid parts are merged into a few draw calls.
+- **Lure orbs:** use 2 pre-built slots whose lights stay in the scene, so throwing never changes the light count (that used to recompile every shader: a 1.7 s freeze on the first throw). All shaders are compiled behind the start screen.
 - **Sky and castle** are a backdrop attached to the camera, so the far plane is only 100 m.
 - **Sky clouds** come from a pre-baked texture instead of per-pixel noise.
 - **Collisions** use a spatial grid.

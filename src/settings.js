@@ -20,7 +20,7 @@ export const QUALITY = {
   high:   { label: 'High',   pixelRatio: (dpr) => Math.min(dpr, 1.5),      shadow: 1024, density: 1,    farMul: 1,    cullMul: 1,    grassShadow: true,  antialias: true },
 };
 
-const DEFAULTS = { quality: 'high', fps: false, compass: true, soundCues: true, tips: true };
+const DEFAULTS = { quality: 'high', fps: false, compass: true, soundCues: true, tips: true, map: 'classic', seed: 0 };
 const KEY = 'rf_settings';
 
 export function loadSettings() {

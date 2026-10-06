@@ -25,24 +25,70 @@ const smooth = (a, b, x) => { const t = Math.min(Math.max((x - a) / (b - a), 0),
 const glowMap = glowTexture('rgba(200,120,255,1)', 'rgba(120,40,255,0)');
 
 // ---------------------------------------------------------------- lure orb
+// Lure orbs borrow pre-built slots. Each slot's PointLight stays in the scene
+// for the whole game (intensity 0 when idle): adding or removing a light would
+// change the light count and force every material to recompile (a ~1.7 s freeze).
+export class LurePool {
+  constructor(scene, size = C.maxCharges) {
+    const coreGeo = new THREE.SphereGeometry(0.1, 12, 10);
+    const coreMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 1.2, 3.5) });
+    this.slots = [];
+    for (let i = 0; i < size; i++) {
+      const group = new THREE.Group();
+      const core = new THREE.Mesh(coreGeo, coreMat);
+      const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowMap, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
+      glow.scale.set(1.2, 1.2, 1);
+      const light = new THREE.PointLight(0xa050ff, 0, 12, 1.6);
+      group.add(core, glow, light);
+      group.position.set(0, -50, 0);
+      scene.add(group);
+      core.visible = glow.visible = false;
+      this.slots.push({ group, core, glow, light, owner: null });
+    }
+  }
+
+  acquire(lure) {
+    let s = this.slots.find((x) => !x.owner);
+    if (!s) { // all busy: recycle the oldest
+      s = this.slots.reduce((a, b) => (a.owner.born < b.owner.born ? a : b));
+      s.owner.slot = null;
+      s.owner.active = false;
+      s.owner.dying = 0;
+    }
+    s.owner = lure;
+    s.core.visible = s.glow.visible = true;
+    s.glow.scale.set(1.2, 1.2, 1);
+    s.glow.material.opacity = 1;
+    return s;
+  }
+
+  release(s) {
+    if (!s) return;
+    s.owner = null;
+    s.core.visible = s.glow.visible = false;
+    s.light.intensity = 0;
+    s.group.position.set(0, -50, 0);
+  }
+
+  releaseAll() { for (const s of this.slots) this.release(s); }
+}
+
+let _born = 0;
 export class Lure {
-  constructor(scene, world, pos, vel) {
-    this.scene = scene;
+  constructor(pool, world, pos, vel) {
+    this.pool = pool;
     this.world = world;
     this.pos = pos.clone();
     this.vel = vel.clone();
     this.life = C.lureLife;
     this.active = true;
     this.dying = 0;
-
-    this.group = new THREE.Group();
-    const core = new THREE.Mesh(new THREE.SphereGeometry(0.1, 12, 10), new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 1.2, 3.5) }));
-    this.glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowMap, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
-    this.glow.scale.set(1.2, 1.2, 1);
-    this.light = new THREE.PointLight(0xa050ff, 5, 12, 1.6);
-    this.group.add(core, this.glow, this.light);
+    this.born = _born++;
+    this.slot = pool.acquire(this);
+    this.group = this.slot.group;
+    this.glow = this.slot.glow;
+    this.light = this.slot.light;
     this.group.position.copy(this.pos);
-    scene.add(this.group);
     this.onBounce = null;
   }
 
@@ -54,13 +100,14 @@ export class Lure {
   }
 
   update(dt, time) {
+    if (!this.slot) return; // recycled by a newer lure
     if (this.dying > 0) {
       this.dying -= dt;
       const k = Math.max(this.dying / 0.35, 0);
       this.glow.scale.setScalar(1.2 + (1 - k) * 4);
       this.glow.material.opacity = k;
       this.light.intensity = 12 * k;
-      if (this.dying <= 0) this.scene.remove(this.group);
+      if (this.dying <= 0) this.dispose();
       return;
     }
     if (!this.active) return;
@@ -97,7 +144,12 @@ export class Lure {
     this.dying = 0.35;
   }
 
-  dispose() { this.scene.remove(this.group); this.active = false; }
+  dispose() {
+    if (this.slot) this.pool.release(this.slot);
+    this.slot = null;
+    this.active = false;
+    this.dying = 0;
+  }
 }
 
 // ---------------------------------------------------------------- arm view model

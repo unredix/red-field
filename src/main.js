@@ -3,22 +3,42 @@ import { Input } from './input.js';
 import { World } from './world.js';
 import { buildRedField } from './maps/redfield.js';
 import { buildTestLevel } from './maps/testlevel.js';
+import { buildGenerated } from './maps/generated.js';
 import { Player } from './player.js';
 import { Flashlight } from './flashlight.js';
 import { Monster } from './monster.js';
-import { Arm, Lure } from './arm.js';
+import { Arm, Lure, LurePool } from './arm.js';
+import { Sparks } from './fx.js';
 import { Sfx } from './audio.js';
 import { Towers } from './towers.js';
 import { Cinematic } from './cinematic.js';
 import { Gore } from './gore.js';
-import { loadSettings, QUALITY, keyLabel, getFlag, setFlag } from './settings.js';
+import { loadSettings, saveSettings, QUALITY, keyLabel, getFlag, setFlag } from './settings.js';
 import { Menu } from './menu.js';
 import { Hints } from './hints.js';
 
-const MAP = new URLSearchParams(location.search).get('map') === 'test' ? 'test' : 'redfield';
+// ---------------------------------------------------------------- map choice
+// ?map=classic|random|test&seed=N overrides the saved choice (so seeds can be shared)
+const settings = loadSettings();
+const params = new URLSearchParams(location.search);
+const newSeed = () => 1 + Math.floor(Math.random() * 999999);
+let MAP = params.get('map');
+if (MAP === 'redfield' || MAP === 'gen') MAP = MAP === 'gen' ? 'random' : 'classic';
+if (!['classic', 'random', 'test'].includes(MAP)) MAP = settings.map === 'random' ? 'random' : 'classic';
+const SEED = MAP === 'random' ? (parseInt(params.get('seed'), 10) || settings.seed || newSeed()) : 0;
+if (MAP !== 'test' && (settings.map !== MAP || (MAP === 'random' && settings.seed !== SEED))) {
+  settings.map = MAP;
+  if (MAP === 'random') settings.seed = SEED;
+  saveSettings(settings);
+}
+function goToMap(map, seed) {
+  settings.map = map;
+  if (map === 'random') settings.seed = seed;
+  saveSettings(settings);
+  location.href = `${location.pathname}?map=${map}${map === 'random' ? `&seed=${seed}` : ''}`;
+}
 
 // ---------------------------------------------------------------- renderer / scene
-const settings = loadSettings();
 const canvas = document.getElementById('game');
 const ANTIALIAS = QUALITY[settings.quality].antialias; // fixed for the life of the WebGL context
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: ANTIALIAS, powerPreference: 'high-performance' });
@@ -42,6 +62,13 @@ if (MAP === 'test') {
   scene.fog = new THREE.FogExp2(0x000000, 0.038);
   scene.add(new THREE.HemisphereLight(0x1c2230, 0x050403, 0.06));
   level = buildTestLevel(scene, world);
+} else if (MAP === 'random') {
+  level = buildGenerated(scene, world, SEED);
+  if (!level.valid) { // the monster couldn't reach everything: try the next seed (a few times)
+    const tries = parseInt(params.get('try'), 10) || 0;
+    if (tries < 5) location.replace(`${location.pathname}?map=random&seed=${SEED + 1}&try=${tries + 1}`);
+    else console.warn(`Seed ${SEED}: some areas may be unreachable for the monster`);
+  }
 } else {
   level = buildRedField(scene, world);
 }
@@ -56,6 +83,8 @@ const monster = level.monsterSpawn ? new Monster(scene, world, level.monsterSpaw
 const arm = new Arm(window.innerWidth / window.innerHeight);
 const sfx = new Sfx();
 const towers = level.towerSites ? new Towers(scene, world, level.towerSites, sfx) : null;
+const lurePool = new LurePool(scene); // fixed lights: throwing never recompiles shaders
+const sparks = new Sparks(scene);
 let lures = [];
 let pendingStrike = null; // tower stone the current claw swing will hit
 
@@ -64,18 +93,23 @@ let state = 'ready';
 let survival = 0;
 let best = 0;
 let bestWin = 0;
+// best times are kept per map type (classic inherits the old single record)
+const BEST_KEY = `rf_best_${MAP}`, BESTWIN_KEY = `rf_bestwin_${MAP}`;
 try {
-  best = parseFloat(localStorage.getItem('rf_best') || '0') || 0;
-  bestWin = parseFloat(localStorage.getItem('rf_bestwin') || '0') || 0;
+  best = parseFloat(localStorage.getItem(BEST_KEY) ?? (MAP === 'classic' ? localStorage.getItem('rf_best') : null) ?? '0') || 0;
+  bestWin = parseFloat(localStorage.getItem(BESTWIN_KEY) ?? (MAP === 'classic' ? localStorage.getItem('rf_bestwin') : null) ?? '0') || 0;
 } catch { /* storage blocked */ }
 let deathT = 0;
 let slowmoT = 0;
 let timeScale = 1;
 let flashRed = 0;
+let hitStopT = 0;   // impact frames: the world freezes (real seconds)
+let flashWhiteT = 0;
 const deathFrom = new THREE.Vector3();
 
 window.game = {
-  THREE, scene, camera, renderer, world, player, flashlight, monster, arm, sfx, level, towers,
+  THREE, scene, camera, renderer, world, player, flashlight, monster, arm, sfx, level, towers, lurePool, sparks,
+  throwLure: () => { const { pos, vel } = arm.throwFrom(camera, player.vel); const l = new Lure(lurePool, world, pos, vel); lures.push(l); return l; },
   get lures() { return lures; },
   get state() { return state; },
   get survival() { return survival; },
@@ -89,6 +123,9 @@ window.game = {
   jumpscareStep: (dt) => updateJumpscare(dt), // dev: advance it manually
   win: () => startVictory(),
   settings,
+  map: MAP,
+  seed: SEED,
+  goToMap: (map, seed) => goToMap(map, seed),
   applyQuality: (q) => applyQuality(q),
   get hints() { return hints; },
 };
@@ -129,9 +166,23 @@ if (monster) {
   monster.onCymbal = (p) => { sfx.cymbal(p); soundCue(p, 0.9); };
   monster.onStunned = (parry) => {
     sfx.clang(parry);
-    if (parry) slowmoT = 0.35;
+    monster.headWorld(_head);
+    if (parry) { // impact frames: freeze, white flash, camera punch, sparks, then slow-mo
+      sfx.parryImpact();
+      hitStopT = 0.13;
+      slowmoT = 0.13 + 0.35;
+      flashWhiteT = 0.05;
+      player.addShake(0.5);
+      player.fov -= 6;
+      sparks.burst(_head, 45, 9, true);
+    } else {
+      hitStopT = 0.04;
+      player.addShake(0.15);
+      sparks.burst(_head, 14, 5);
+    }
     flashRed = -1; // purple flash
   };
+  monster.onParryCue = (p) => sfx.parryCue(p);
   monster.onKill = () => die();
   monster.onSniff = (p) => {
     sfx.sniff(p);
@@ -169,7 +220,7 @@ function die() {
   sfx.roar(monster ? monster.pos : null, true);
   if (survival > best) {
     best = survival;
-    try { localStorage.setItem('rf_best', String(best)); } catch { /* ignore */ }
+    try { localStorage.setItem(BEST_KEY, String(best)); } catch { /* ignore */ }
   }
 }
 
@@ -183,6 +234,9 @@ function restart() {
   arm.reset();
   for (const l of lures) l.dispose();
   lures = [];
+  lurePool.releaseAll();
+  sparks.clear();
+  hitStopT = 0;
   flashlight.reset();
   world.clearScent();
   survival = 0;
@@ -215,39 +269,48 @@ function startIntro() {
   document.body.classList.add('cinematic');
   ui.overlay.classList.add('hidden');
   const m = monster;
-  const site = towers.sites[2];
+  const I = level.intro || CLASSIC_INTRO;
+  const site = towers.sites[I.tower];
   const g = (x, z) => world.groundHeight(x, z);
+  const wf = { x: Math.sin(I.beast.yaw), z: Math.cos(I.beast.yaw) };  // beast walk direction
+  const side = { x: -Math.cos(I.beast.yaw), z: Math.sin(I.beast.yaw) }; // camera side
   let roared = false;
   cine.play([
     { // 1: over the field towards the castle
       dur: 4, caption: ['RED FIELD', 'title'],
       update: (k) => {
         const e = k * k * (3 - 2 * k);
-        camera.position.set(-40 + e * 22, 24 - e * 8, 40 - e * 20);
-        camera.lookAt(-6, 4, -60);
+        camera.position.set(
+          I.flyFrom[0] + (I.flyTo[0] - I.flyFrom[0]) * e,
+          I.flyFrom[1] + (I.flyTo[1] - I.flyFrom[1]) * e,
+          I.flyFrom[2] + (I.flyTo[2] - I.flyFrom[2]) * e);
+        camera.lookAt(I.look[0], I.look[1], I.look[2]);
       },
     },
     { // 2: the beast walks past, then roars
       dur: 4.5, caption: ['It hunts the light... and your scent.'],
       start: () => {
         m.reset();
-        m.pos.set(-7, g(-7, 16), 16);
-        m.yaw = Math.PI / 2; // walking towards +x
+        m.pos.set(I.beast.x, g(I.beast.x, I.beast.z), I.beast.z);
+        m.yaw = I.beast.yaw;
         m.state = 'CHASE';
       },
       update: (k, t, dt) => {
         m.speed = t > 1.6 && t < 2.9 ? 0.5 : 3.4;
-        m.pos.x += m.speed * dt;
+        m.pos.x += wf.x * m.speed * dt;
+        m.pos.z += wf.z * m.speed * dt;
         m.pos.y = g(m.pos.x, m.pos.z);
         if (t > 1.6 && !roared) { roared = true; m.state = 'ATTACK'; m.attackPhase = 'windup'; m.rear = 0; sfx.roar(m.pos, true); }
         if (t > 2.9 && m.state === 'ATTACK') { m.state = 'CHASE'; m.attackPhase = null; }
         // turn to face the camera for the roar, head tracking it
-        const yawT = t > 1.3 && t < 3.3 ? Math.PI / 2 - 1.1 : Math.PI / 2; // camera is on the +z side
+        const yawT = t > 1.3 && t < 3.3 ? I.beast.yaw - 1.1 : I.beast.yaw; // turns towards the camera side
         m.yaw += (yawT - m.yaw) * Math.min(1, dt * 4);
         m.awareness = 1;
         m._animate(dt, { time, player: { pos: camera.position } });
         m.headWorld(introTo);
-        camera.position.set(m.pos.x - 3 + t * 0.4, g(m.pos.x, 26) + 1.6, 26);
+        const back = -3 + t * 0.4;
+        const cx = m.pos.x + wf.x * back + side.x * 10, cz = m.pos.z + wf.z * back + side.z * 10;
+        camera.position.set(cx, g(cx, cz) + 1.6, cz);
         camera.lookAt(introTo);
       },
     },
@@ -264,6 +327,11 @@ function startIntro() {
 }
 
 let introT0 = 0;
+// the classic map's intro shots
+const CLASSIC_INTRO = {
+  flyFrom: [-40, 24, 40], flyTo: [-18, 16, 20], look: [-6, 4, -60],
+  beast: { x: -7, z: 16, yaw: Math.PI / 2 }, tower: 2,
+};
 function endIntro() {
   monster?.reset();
   document.body.classList.remove('cinematic');
@@ -317,7 +385,7 @@ function showWin() {
   document.body.classList.remove('cinematic');
   if (!bestWin || survival < bestWin) {
     bestWin = survival;
-    try { localStorage.setItem('rf_bestwin', String(bestWin)); } catch { /* ignore */ }
+    try { localStorage.setItem(BESTWIN_KEY, String(bestWin)); } catch { /* ignore */ }
   }
   ui.winTime.textContent = fmt(survival);
   ui.winBest.textContent = fmt(bestWin);
@@ -401,6 +469,8 @@ let screenT0 = 0; // when the death / win screen appeared (retry keys wait a mom
 const menu = new Menu({
   settings, input,
   antialiasNow: ANTIALIAS,
+  map: MAP, seed: SEED, newSeed,
+  onMap: (map, seed) => goToMap(map, seed),
   onRestart: () => { sfx.init(); restart(); input.requestLock(); },
   onIntro: () => { sfx.init(); input.requestLock(); startIntro(); },
   onChange: (key) => {
@@ -412,6 +482,9 @@ const menu = new Menu({
   },
 });
 menu.setMode('start', { introSeen: getFlag('rf_intro_seen', false) && !!towers });
+for (const el of document.querySelectorAll('.map-hint')) {
+  el.textContent = MAP === 'random' ? `Seed ${SEED} · press N for a new random map` : '';
+}
 function applyHudSettings() {
   ui.fps.classList.toggle('show', settings.fps);
   if (settings.fps && !ui.fps.textContent) ui.fps.textContent = '-- fps';
@@ -437,6 +510,7 @@ for (const el of [ui.death, ui.win]) el.addEventListener('click', retry);
 window.addEventListener('keydown', (e) => {
   if (input.capture || e.repeat) return;
   if (['KeyR', 'Space', 'Enter'].includes(e.code)) retry();
+  if (e.code === 'KeyN' && MAP === 'random' && (state === 'dead' || state === 'won') && performance.now() - screenT0 > 600) goToMap('random', newSeed());
   // R on the pause screen restarts the run
   if (e.code === 'KeyR' && state === 'playing' && !input.locked && !menu.settingsOpen) menu.el.restart.click();
 });
@@ -572,7 +646,7 @@ function checkHints() {
     if (monster.awareness > 0.35) hints.show('aware', () => `The eye means it's noticing you. Hold ${k('hide')} to hide: your light goes dark.`);
     if (monster.state === 'CHASE') hints.show('chase', () => `Break its line of sight. ${k('lure')} throws a lure it will chase.`);
     if (monster.state === 'ATTACK' && monster.attackPhase === 'windup' && d < 15) {
-      hints.show('lunge', () => `Eyes flare + cymbal = lunge. Sidestep, or ${k('slash')} to parry.`);
+      hints.show('lunge', () => `It's about to lunge. Sidestep, or ${k('slash')} the moment its eyes flash white to parry.`);
     }
   }
   if (!player.hiding && world.inGrass(player.pos.x, player.pos.z)) {
@@ -681,7 +755,9 @@ function frame() {
   const realDt = Math.min(clock.getDelta(), 1 / 20);
   slowmoT -= realDt;
   timeScale = slowmoT > 0 ? 0.3 : Math.min(1, timeScale + realDt * 3);
-  const dt = realDt * timeScale;
+  let dt = realDt * timeScale;
+  if (hitStopT > 0) { hitStopT -= realDt; dt = 0; }
+  if (state === 'playing') canvas.classList.toggle('distort', hitStopT > 0);
   time += dt;
 
   const playing = state === 'playing' && input.locked;
@@ -719,6 +795,7 @@ function frame() {
   }
 
   for (const l of lures) l.update(dt, time);
+  sparks.update(dt);
   lures = lures.filter((l) => l.active || l.dying > 0);
 
   towers?.update(playing || state === 'victory' ? dt : 0, time, { player, camera });
@@ -739,7 +816,7 @@ function frame() {
       },
       onThrow: () => {
         const { pos, vel } = arm.throwFrom(camera, player.vel);
-        const l = new Lure(scene, world, pos, vel);
+        const l = new Lure(lurePool, world, pos, vel);
         l.onBounce = (p) => sfx.chime(p, 0.4);
         lures.push(l);
         sfx.chime(pos, 0.6);
@@ -789,7 +866,11 @@ function frame() {
     const hunting = playing && (monster.state === 'CHASE' || monster.state === 'ATTACK');
     if (state !== 'dying') ui.chase.style.opacity = hunting ? String(0.35 + 0.25 * Math.sin(time * 8)) : '0';
   }
-  if (flashRed < 0) { // purple parry/stun flash
+  if (flashWhiteT > 0) { // first frames of a parry
+    flashWhiteT -= realDt;
+    ui.red.style.background = 'rgba(255,250,255,0.85)';
+    ui.red.style.opacity = '1';
+  } else if (flashRed < 0) { // purple parry/stun flash
     flashRed = Math.min(0, flashRed + realDt * 3);
     ui.red.style.background = 'radial-gradient(ellipse at center, rgba(150,60,255,0.25), rgba(90,20,200,0.6))';
     ui.red.style.opacity = String(-flashRed);
@@ -824,4 +905,7 @@ function frame() {
 }
 
 player._updateCamera(0, 0, 0);
+// compile every shader now (behind the start screen) instead of on first use
+renderer.compile(scene, camera);
+renderer.compile(arm.scene, arm.camera);
 frame();

@@ -71,6 +71,18 @@
       <h1 id="menu-title">RED FIELD</h1>
       <p class="goal">Wake the three towers to destroy the beast. It hunts the light, and your scent.</p>
       <p class="click" id="menu-click">Click to start</p>
+      <div class="set-row menu-ui">
+        <span>Map</span>
+        <div class="seg" id="set-map">
+          <button data-map="classic">Red Field</button><button data-map="random">Random</button>
+        </div>
+      </div>
+      <div class="set-row menu-ui" id="seed-row">
+        <span class="note" id="seed-label"></span>
+        <button id="btn-new-seed" class="small">New seed</button>
+        <button id="btn-copy-seed" class="small">Copy link</button>
+      </div>
+      <p class="note menu-ui" id="map-note"></p>
       <div class="menu-buttons menu-ui">
         <button id="btn-restart" class="hidden">Restart (R)</button>
         <button id="btn-settings">Settings</button>
@@ -117,6 +129,7 @@
       <p class="big">You survived <span id="death-time">0:00</span></p>
       <p>Best: <span id="death-best">0:00</span></p>
       <p id="death-towers"></p>
+      <p class="note map-hint"></p>
       <p class="click">Click or press R to try again</p>
     </div>
   </div>
@@ -127,6 +140,7 @@
       <h1 class="win-title">SILENCE</h1>
       <p class="big">The towers sang the beast to death in <span id="win-time">0:00</span></p>
       <p>Fastest: <span id="win-best">0:00</span></p>
+      <p class="note map-hint"></p>
       <p class="click">Click or press R to play again</p>
     </div>
   </div>
