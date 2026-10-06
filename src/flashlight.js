@@ -48,6 +48,16 @@ export class Flashlight {
     this.onTime = 0;
   }
 
+  // Shadow quality: 0 = off, otherwise the shadow map size.
+  setShadow(size) {
+    this.light.castShadow = size > 0;
+    if (size > 0 && this.light.shadow.mapSize.x !== size) {
+      this.light.shadow.mapSize.set(size, size);
+      this.light.shadow.map?.dispose();
+      this.light.shadow.map = null; // re-created at the new size
+    }
+  }
+
   reset() {
     this.on = true;
     this.onTime = 0;

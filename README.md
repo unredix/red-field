@@ -28,6 +28,17 @@ then open http://localhost:8080 and click. `?map=test` loads the old movement te
 | Left click | **Claw slash**: stuns the monster up close; during its lunge windup it's a **parry** (longer stun) |
 | Right click | **Lure**: throws a glowing orb the monster chases and destroys |
 | F3 | Debug overlay (monster state, awareness) |
+| Esc | Pause: resume, restart (R), settings |
+
+All keys except Esc can be rebound in **Settings** (click a key, then press the new one; a key that's already used swaps). Bindings are saved in the browser.
+
+## Settings and quality-of-life
+
+- **Graphics:** Low / Medium / High. They change resolution scale, flashlight shadows, grass density and cull distance; High is the original look. Low was about 1.7× faster than High in testing. Antialiasing (off on Low) changes after a reload. If the first 20 s run slowly, the game suggests lowering it.
+- **HUD toggles:** FPS counter, tower compass (red ✦ = asleep, purple = awake; arrows at the edge when behind you), and sound-direction arcs that show where monster sounds outside your view come from.
+- **Tips:** short first-time hints (hiding, lures, the lunge, scent, tall grass, towers, claw charges, stamina). Each shows once; "Reset tips" brings them back.
+- **Faster flow:** the intro only auto-plays the first time ("Watch intro" replays it); R / Space / Enter retries on the death and win screens; R restarts from the pause screen; audio ducks while paused.
+- R no longer teleports you to spawn in Red Field (it still does on the test map).
 
 ## Towers (`src/towers.js`, tune `TOWER_CONFIG`)
 
@@ -111,9 +122,12 @@ The monster is 1.5× the original size.
 - `src/cinematic.js`: shot sequencer used by the intro and victory cinematics.
 - `src/monsterModel.js`: the monster's procedural model (swap in a GLB here).
 - `src/gore.js`: screen blood for the death jumpscare.
+- `src/settings.js`: saved settings, quality presets, default key bindings, key labels.
+- `src/menu.js`: start / pause screen and the settings panel (rebinding).
+- `src/hints.js`: first-time tips queue.
 - `src/maps/testlevel.js`: the old test map.
 
-`window.game` exposes everything in the dev console (e.g. `game.monster.awareness`, `game.restart()`, `game.intro()`, `game.win()`). `game.die()` triggers the jumpscare. Set `game.jumpscareSpeed = 0` and call `game.jumpscareStep(1/60)` to step through it frame by frame.
+`window.game` exposes everything in the dev console (e.g. `game.monster.awareness`, `game.restart()`, `game.intro()`, `game.win()`, `game.applyQuality('low')`). `game.die()` triggers the jumpscare. Set `game.jumpscareSpeed = 0` and call `game.jumpscareStep(1/60)` to step through it frame by frame.
 
 ## Performance notes
 

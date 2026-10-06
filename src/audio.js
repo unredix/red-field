@@ -32,6 +32,13 @@ export class Sfx {
   }
 
   get ready() { return !!this.ctx && this.ctx.state === 'running'; }
+
+  // Duck everything while the game is paused.
+  setPaused(paused) {
+    if (!this.ctx || this._paused === paused) return;
+    this._paused = paused;
+    this.master.gain.setTargetAtTime(paused ? 0.27 : 0.9, this.ctx.currentTime, 0.15);
+  }
   get now() { return this.ctx.currentTime; }
 
   setListener(camera) {

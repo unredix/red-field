@@ -254,5 +254,6 @@ export function buildTestLevel(scene, world) {
   return {
     spawn: new THREE.Vector3(0, 0, 8),
     spawnYaw: 0, // facing -Z (north)
+    allowRespawnKey: true,
   };
 }

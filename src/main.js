@@ -11,13 +11,18 @@ import { Sfx } from './audio.js';
 import { Towers } from './towers.js';
 import { Cinematic } from './cinematic.js';
 import { Gore } from './gore.js';
+import { loadSettings, QUALITY, keyLabel, getFlag, setFlag } from './settings.js';
+import { Menu } from './menu.js';
+import { Hints } from './hints.js';
 
 const MAP = new URLSearchParams(location.search).get('map') === 'test' ? 'test' : 'redfield';
 
 // ---------------------------------------------------------------- renderer / scene
+const settings = loadSettings();
 const canvas = document.getElementById('game');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); // 2x on HiDPI costs 4x the pixels
+const ANTIALIAS = QUALITY[settings.quality].antialias; // fixed for the life of the WebGL context
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: ANTIALIAS, powerPreference: 'high-performance' });
+renderer.setPixelRatio(QUALITY[settings.quality].pixelRatio(window.devicePixelRatio)); // 2x on HiDPI costs 4x the pixels
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -43,7 +48,9 @@ if (MAP === 'test') {
 
 // ---------------------------------------------------------------- game objects
 const input = new Input(canvas);
+input.binds = settings.binds;
 const player = new Player(camera, world, input, level.spawn, level.spawnYaw);
+player.allowRespawnKey = !!level.allowRespawnKey;
 const flashlight = new Flashlight(scene);
 const monster = level.monsterSpawn ? new Monster(scene, world, level.monsterSpawn) : null;
 const arm = new Arm(window.innerWidth / window.innerHeight);
@@ -81,7 +88,20 @@ window.game = {
   jumpscareSpeed: 1,                        // dev: 0 freezes the death sequence
   jumpscareStep: (dt) => updateJumpscare(dt), // dev: advance it manually
   win: () => startVictory(),
+  settings,
+  applyQuality: (q) => applyQuality(q),
+  get hints() { return hints; },
 };
+
+// ---------------------------------------------------------------- graphics quality
+function applyQuality(name) {
+  const q = QUALITY[name] || QUALITY.high;
+  renderer.setPixelRatio(q.pixelRatio(window.devicePixelRatio));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  flashlight.setShadow(q.shadow);
+  level.setQuality?.(q);
+}
+applyQuality(settings.quality);
 
 // ---------------------------------------------------------------- hooks
 player.onFootstep = (k) => {
@@ -98,19 +118,26 @@ if (monster) {
   monster.onStep = (p, k) => {
     sfx.drum(p, 0.45 + 0.55 * k);
     if (state === 'playing') player.addShake(0.32 * k * nearK(p, 24) ** 2);
+    const loud = monster.state === 'CHASE' || monster.state === 'ATTACK' || monster.state === 'INVESTIGATE';
+    if (loud || nearK(p, 20) > 0) soundCue(p, 0.35 + 0.4 * k, 'step');
   };
   monster.onRoar = (p) => {
     sfx.roar(p);
     if (state === 'playing') player.addShake(0.45 * nearK(p, 30));
+    soundCue(p, 1);
   };
-  monster.onCymbal = (p) => sfx.cymbal(p);
+  monster.onCymbal = (p) => { sfx.cymbal(p); soundCue(p, 0.9); };
   monster.onStunned = (parry) => {
     sfx.clang(parry);
     if (parry) slowmoT = 0.35;
     flashRed = -1; // purple flash
   };
   monster.onKill = () => die();
-  monster.onSniff = (p) => sfx.sniff(p);
+  monster.onSniff = (p) => {
+    sfx.sniff(p);
+    soundCue(p, 0.6);
+    if (state === 'playing') hints.show('sniff', "It's following your scent. Wade through a blood pool to wash it off.");
+  };
   monster.onCollapse = () => {
     flashRed = -1.6;
     sfx.drum(monster.pos, 1.6);
@@ -165,6 +192,7 @@ function restart() {
   ui.win.classList.add('hidden');
   ui.red.style.opacity = '0';
   clearDeathFx();
+  ui.fade.classList.remove('go'); void ui.fade.offsetWidth; ui.fade.classList.add('go');
 }
 
 function clearDeathFx() {
@@ -245,11 +273,18 @@ function endIntro() {
   flashlight.reset();
   sfx.click();
   toast('Find the towers (look for the red lights on the horizon)', 5);
-  if (!input.locked) ui.overlay.classList.remove('hidden');
+  if (towers) setFlag('rf_intro_seen', true);
+  hints.show('move', () => `${keyLabel(input.binds.sprint)} sprints but it's loud. Run along walls to wall-run, ${keyLabel(input.binds.jump)} to wall-jump.`);
+  if (!input.locked) { menu.setMode('pause'); ui.overlay.classList.remove('hidden'); }
 }
 
 function skipIntroInput() {
   if (state === 'intro' && performance.now() - introT0 > 300) cine.skip();
+}
+// start the run: the intro only plays until it has been seen once
+function startGame() {
+  if (getFlag('rf_intro_seen', false) || !towers) endIntro();
+  else startIntro();
 }
 window.addEventListener('keydown', (e) => { if (['Space', 'Enter', 'Escape'].includes(e.code)) skipIntroInput(); });
 window.addEventListener('mousedown', skipIntroInput);
@@ -287,6 +322,7 @@ function showWin() {
   ui.winTime.textContent = fmt(survival);
   ui.winBest.textContent = fmt(bestWin);
   ui.win.classList.remove('hidden');
+  screenT0 = performance.now();
   document.exitPointerLock?.();
 }
 
@@ -319,6 +355,9 @@ const ui = {
   blackout: document.getElementById('blackout'),
   blood: document.getElementById('blood'),
   jaws: document.getElementById('jaws'),
+  fps: document.getElementById('fps'),
+  compass: document.getElementById('compass'),
+  cues: document.getElementById('cues'),
 };
 const gore = new Gore(ui.blood);
 // jaws overlay: each row is its own random set of curved, bloodied teeth so they interlock
@@ -357,28 +396,58 @@ function toast(text, secs = 3) {
   ui.toast.classList.add('show');
   toastT = secs;
 }
+const hints = new Hints({ toast: (t, secs) => toast(t, secs), busy: () => toastT > 0, enabled: () => settings.tips });
+let screenT0 = 0; // when the death / win screen appeared (retry keys wait a moment)
+const menu = new Menu({
+  settings, input,
+  antialiasNow: ANTIALIAS,
+  onRestart: () => { sfx.init(); restart(); input.requestLock(); },
+  onIntro: () => { sfx.init(); input.requestLock(); startIntro(); },
+  onChange: (key) => {
+    if (key === 'quality') applyQuality(settings.quality);
+    else if (key === 'binds') input.binds = settings.binds;
+    else if (key === 'resetTips') hints.reset();
+    else if (key === 'tips' && !settings.tips) hints.clearQueue();
+    applyHudSettings();
+  },
+});
+menu.setMode('start', { introSeen: getFlag('rf_intro_seen', false) && !!towers });
+function applyHudSettings() {
+  ui.fps.classList.toggle('show', settings.fps);
+  if (settings.fps && !ui.fps.textContent) ui.fps.textContent = '-- fps';
+}
 let showDebug = false;
 let staminaFullT = 0;
 const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 if (MAP === 'test') { ui.timer.style.display = 'none'; ui.towers.style.display = 'none'; }
 
-ui.overlay.addEventListener('click', () => {
+ui.overlay.addEventListener('click', (e) => {
+  if (menu.settingsOpen || e.target.closest('.menu-ui')) return; // buttons / settings handle themselves
   sfx.init();
   input.requestLock();
-  if (state === 'ready') startIntro();
+  if (state === 'ready') startGame();
 });
-for (const el of [ui.death, ui.win]) {
-  el.addEventListener('click', () => {
-    if (state !== 'dead' && state !== 'won') return;
-    sfx.init();
-    restart();
-    input.requestLock();
-  });
+function retry() {
+  if ((state !== 'dead' && state !== 'won') || performance.now() - screenT0 < 600) return;
+  sfx.init();
+  restart();
+  input.requestLock();
 }
+for (const el of [ui.death, ui.win]) el.addEventListener('click', retry);
+window.addEventListener('keydown', (e) => {
+  if (input.capture || e.repeat) return;
+  if (['KeyR', 'Space', 'Enter'].includes(e.code)) retry();
+  // R on the pause screen restarts the run
+  if (e.code === 'KeyR' && state === 'playing' && !input.locked && !menu.settingsOpen) menu.el.restart.click();
+});
 const noOverlay = ['intro', 'dying', 'dead', 'victory', 'won'];
 input.onLockChange = (locked) => {
+  if (!locked && state !== 'ready') menu.setMode('pause');
+  if (locked && menu.settingsOpen) menu.openSettings(false);
   ui.overlay.classList.toggle('hidden', locked || noOverlay.includes(state));
 };
+document.addEventListener('visibilitychange', () => { if (document.hidden) sfx.setPaused(true); });
+applyHudSettings();
 
 {
   const c = document.createElement('canvas');
@@ -484,7 +553,126 @@ function updateJumpscare(realDt) {
     ui.deathBest.textContent = fmt(best);
     if (towers) ui.deathTowers.textContent = `Towers awakened: ${towers.count}/${towers.total}`;
     ui.death.classList.remove('hidden');
+    screenT0 = performance.now();
     document.exitPointerLock?.();
+  }
+}
+
+// ---------------------------------------------------------------- guidance: tips, compass, sound cues
+function clawDenied() {
+  sfx.deny();
+  hints.show('claw', 'Claw is out of charges. The veins refill one every 25 s.');
+}
+
+function checkHints() {
+  const k = (a) => keyLabel(input.binds[a]);
+  if (player.exhausted) hints.show('stamina', 'Out of breath. Stamina refills when you stop sprinting.');
+  if (monster) {
+    const d = Math.hypot(monster.pos.x - player.pos.x, monster.pos.z - player.pos.z);
+    if (monster.awareness > 0.35) hints.show('aware', () => `The eye means it's noticing you. Hold ${k('hide')} to hide: your light goes dark.`);
+    if (monster.state === 'CHASE') hints.show('chase', () => `Break its line of sight. ${k('lure')} throws a lure it will chase.`);
+    if (monster.state === 'ATTACK' && monster.attackPhase === 'windup' && d < 15) {
+      hints.show('lunge', () => `Eyes flare + cymbal = lunge. Sidestep, or ${k('slash')} to parry.`);
+    }
+  }
+  if (!player.hiding && world.inGrass(player.pos.x, player.pos.z)) {
+    hints.show('grass', () => `Tall grass: hold ${k('hide')} here and you're nearly invisible.`);
+  }
+  if (towers) {
+    for (const s of towers.sites) {
+      if (s.phase === 0 && Math.hypot(s.x - player.pos.x, s.z - player.pos.z) < 12) {
+        hints.show('tower', 'Stand in the rune circle with your light on to charge the tower.');
+      }
+    }
+  }
+}
+
+// One nudge per session if the first seconds of play run slowly.
+const perf = { t: 0, frames: 0, time: 0, done: false };
+function checkFrameRate(realDt) {
+  if (perf.done) return;
+  perf.t += realDt;
+  if (perf.t < 3) return; // skip shader warm-up
+  perf.frames++; perf.time += realDt;
+  if (perf.t < 20) return;
+  perf.done = true;
+  if (perf.time / perf.frames > 0.022 && settings.quality !== 'low') {
+    toast('Low frame rate: lower Graphics in the pause menu (Esc)', 6);
+  }
+}
+
+// Compass strip: 320 px shows 180 degrees. Heading 0 = north (-z); angles grow to the left like yaw.
+const COMPASS_W = 320, COMPASS_FOV = Math.PI;
+const compass = { ticks: [], marks: [] };
+{
+  const strip = ui.compass.querySelector('.strip');
+  const names = { 0: 'N', 6: 'W', 12: 'S', 18: 'E' }; // every 15 degrees, counter-clockwise
+  for (let i = 0; i < 24; i++) {
+    const el = document.createElement('div');
+    el.className = names[i] ? 'tick major' : 'tick';
+    if (names[i]) el.textContent = names[i];
+    strip.appendChild(el);
+    compass.ticks.push({ el, a: (i / 24) * Math.PI * 2 });
+  }
+  for (let i = 0; i < (towers ? towers.total : 0); i++) {
+    const el = document.createElement('div');
+    el.className = 'mk';
+    strip.appendChild(el);
+    compass.marks.push(el);
+  }
+}
+const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+const headingTo = (x, z) => Math.atan2(-(x - player.pos.x), -(z - player.pos.z));
+function updateCompass(show) {
+  ui.compass.classList.toggle('show', show && !!towers);
+  if (!show || !towers) return;
+  const half = COMPASS_W / 2;
+  for (const t of compass.ticks) {
+    const rel = wrapPi(t.a - player.yaw);
+    const vis = Math.abs(rel) < COMPASS_FOV / 2;
+    t.el.style.display = vis ? '' : 'none';
+    if (vis) t.el.style.left = `${half - (rel / (COMPASS_FOV / 2)) * half}px`;
+  }
+  towers.sites.forEach((s, i) => {
+    const el = compass.marks[i];
+    const rel = wrapPi(headingTo(s.x, s.z) - player.yaw);
+    const lim = COMPASS_FOV / 2 - 0.12;
+    const edge = Math.abs(rel) > lim;
+    const r = Math.max(-1, Math.min(1, rel / lim));
+    el.style.left = `${half - r * (half - 8)}px`;
+    el.textContent = edge ? (rel > 0 ? '◂✦' : '✦▸') : '✦';
+    el.classList.toggle('awake', s.phase === 3);
+    el.classList.toggle('edge', edge);
+  });
+}
+
+// Sound-direction cues: a red arc at the screen edge pointing at monster sounds
+// that come from outside the view.
+const cues = [];
+for (let i = 0; i < 6; i++) {
+  const el = document.createElement('div');
+  el.className = 'cue';
+  ui.cues.appendChild(el);
+  cues.push({ el, life: 0, peak: 0 });
+}
+let cueNext = 0, lastStepCue = -1;
+function soundCue(p, loud, kind) {
+  if (!settings.soundCues || state !== 'playing' || !input.locked) return;
+  const d = Math.hypot(p.x - player.pos.x, p.z - player.pos.z);
+  if (d > 35) return;
+  if (kind === 'step') { if (time - lastStepCue < 0.35) return; lastStepCue = time; }
+  const rel = wrapPi(headingTo(p.x, p.z) - player.yaw);
+  if (Math.abs(rel) < Math.PI / 4) return; // you can see it
+  const c = cues[cueNext++ % cues.length];
+  c.life = 0.8;
+  c.peak = Math.min(1, loud * (1.15 - d / 35));
+  c.el.style.transform = `rotate(${(-rel * 180) / Math.PI}deg)`;
+}
+function updateCues(dt) {
+  for (const c of cues) {
+    if (c.life <= 0) continue;
+    c.life -= dt;
+    c.el.style.opacity = c.life > 0 ? String(c.peak * Math.min(1, c.life / 0.5)) : '0';
   }
 }
 
@@ -508,13 +696,13 @@ function frame() {
     if (flashlight.on === player.hiding) { flashlight.toggle(); sfx.click(); }
     // scent trail; wading through blood washes it away
     world.updateScent(dt, player.pos, player.wading, player.hidden);
-    if (input.justPressed('F3')) { showDebug = !showDebug; ui.debug.style.display = showDebug ? 'block' : 'none'; }
-    if (input.justPressed('Mouse0')) {
+    if (input.actionPressed('debug')) { showDebug = !showDebug; ui.debug.style.display = showDebug ? 'block' : 'none'; }
+    if (input.actionPressed('slash')) {
       const stone = towers?.aim(camera);
       if (stone) { if (arm.trigger('slash', true)) { pendingStrike = stone; sfx.whoosh(); } }
-      else if (arm.trigger('slash')) sfx.whoosh(); else sfx.deny();
+      else if (arm.trigger('slash')) sfx.whoosh(); else clawDenied();
     }
-    if (input.justPressed('Mouse2')) { if (arm.trigger('throw')) sfx.whoosh(); else sfx.deny(); }
+    if (input.actionPressed('lure')) { if (arm.trigger('throw')) sfx.whoosh(); else clawDenied(); }
 
     const lure = lures.filter((l) => l.active).at(-1) || null;
     monster?.update(dt, { player, flashlight, camera, lure, time: survival });
@@ -587,6 +775,13 @@ function frame() {
     }
   }
   if (toastT > 0) { toastT -= realDt; if (toastT <= 0) ui.toast.classList.remove('show'); }
+  const paused = state === 'playing' && !input.locked;
+  sfx.setPaused(paused);
+  document.body.classList.toggle('paused', paused);
+  if (playing) { checkHints(); checkFrameRate(realDt); }
+  hints.update(playing ? realDt : 0);
+  updateCompass(playing && settings.compass);
+  updateCues(realDt);
   if (monster) {
     const aw = monster.awareness;
     ui.eye.style.opacity = String(aw < 0.08 ? 0 : 0.15 + aw * 0.85);
@@ -604,7 +799,10 @@ function frame() {
   ui.grain.style.backgroundPosition = `${(Math.random() * 128) | 0}px ${(Math.random() * 128) | 0}px`;
 
   fpsAcc += realDt; fpsFrames++;
-  if (fpsAcc > 0.5) { fps = Math.round(fpsFrames / fpsAcc); fpsAcc = 0; fpsFrames = 0; }
+  if (fpsAcc > 0.5) {
+    fps = Math.round(fpsFrames / fpsAcc); fpsAcc = 0; fpsFrames = 0;
+    if (settings.fps) ui.fps.textContent = `${fps} fps`;
+  }
   if (showDebug) {
     const p = player.pos;
     ui.debug.textContent =

@@ -470,6 +470,7 @@ export function buildRedField(scene, world) {
     towerSites,
     bounds: HALF,
     stats: { chunks, colliders: world.colliders.length },
+    setQuality: (q) => kit.setQuality(q),
     update(dt, time, camera) {
       backdrop.position.copy(camera.position);
       skyMat.uniforms.uTime.value = time;

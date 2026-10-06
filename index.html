@@ -60,29 +60,53 @@
     <div id="crosshair"></div>
     <div id="stamina"><div id="stamina-fill"></div></div>
     <pre id="debug"></pre>
+    <div id="fps"></div>
+    <div id="compass"><div class="strip"></div><div class="center"></div></div>
+    <div id="cues"></div>
   </div>
 
   <!-- Start / pause screen -->
   <div id="overlay">
-    <div class="panel">
-      <h1>RED FIELD</h1>
+    <div class="panel" id="menu-main">
+      <h1 id="menu-title">RED FIELD</h1>
       <p class="goal">Wake the three towers to destroy the beast. It hunts the light, and your scent.</p>
-      <p class="click">Click to start</p>
-      <table>
-        <tr><td>W A S D</td><td>Move</td></tr>
-        <tr><td>Shift</td><td>Sprint (loud)</td></tr>
-        <tr><td>Space</td><td>Jump / wall jump</td></tr>
-        <tr><td>Hold C</td><td>Hide: you stop and your flashlight goes dark. Best in tall grass</td></tr>
-        <tr><td>Left click</td><td>Claw slash: stuns up close. Parry its lunge</td></tr>
-        <tr><td>Right click</td><td>Throw a lure. It chases the light</td></tr>
-        <tr><td>Esc</td><td>Pause</td></tr>
-      </table>
+      <p class="click" id="menu-click">Click to start</p>
+      <div class="menu-buttons menu-ui">
+        <button id="btn-restart" class="hidden">Restart (R)</button>
+        <button id="btn-settings">Settings</button>
+        <button id="btn-intro" class="hidden">Watch intro</button>
+      </div>
+      <table id="controls"></table>
       <p class="tips">
         The arm's veins show your claw charges and pulse faster when it's near.<br />
         When its eyes flare and the cymbal crashes, get out of the way or slash.<br />
         If you hear it sniffing, it's on your trail. Wade through blood to wash your scent away.<br />
         Towers: stand in the rune circle to charge, then strike the stones in the order they sing.
       </p>
+    </div>
+    <div class="panel menu-ui hidden" id="menu-settings">
+      <h2>Settings</h2>
+      <div class="set-row">
+        <span>Graphics</span>
+        <div class="seg" id="set-quality">
+          <button data-q="low">Low</button><button data-q="medium">Medium</button><button data-q="high">High</button>
+        </div>
+      </div>
+      <p class="note" id="aa-note"></p>
+      <div class="checks">
+        <label><input type="checkbox" id="set-fps" /> FPS counter</label>
+        <label><input type="checkbox" id="set-compass" /> Tower compass</label>
+        <label><input type="checkbox" id="set-soundCues" /> Show where sounds come from</label>
+        <label><input type="checkbox" id="set-tips" /> Tips</label>
+        <button id="btn-reset-tips" class="small">Reset tips</button>
+      </div>
+      <h3>Controls <span class="note">(click a key to change it)</span></h3>
+      <table id="binds"></table>
+      <p class="note" id="bind-note"></p>
+      <div class="menu-buttons">
+        <button id="btn-reset-binds" class="small">Reset keys</button>
+        <button id="btn-back">Back</button>
+      </div>
     </div>
   </div>
 
@@ -93,7 +117,7 @@
       <p class="big">You survived <span id="death-time">0:00</span></p>
       <p>Best: <span id="death-best">0:00</span></p>
       <p id="death-towers"></p>
-      <p class="click">Click to try again</p>
+      <p class="click">Click or press R to try again</p>
     </div>
   </div>
 
@@ -103,7 +127,7 @@
       <h1 class="win-title">SILENCE</h1>
       <p class="big">The towers sang the beast to death in <span id="win-time">0:00</span></p>
       <p>Fastest: <span id="win-best">0:00</span></p>
-      <p class="click">Click to play again</p>
+      <p class="click">Click or press R to play again</p>
     </div>
   </div>
 

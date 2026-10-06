@@ -73,6 +73,7 @@ export class Player {
     this.vel = new THREE.Vector3();
     this.onFootstep = null; // hook for audio later: (intensity) => {}
     this.onLand = null;     // (impactSpeed) => {}
+    this.allowRespawnKey = false; // R = back to spawn (test map only)
     this.respawn();
   }
 
@@ -300,7 +301,7 @@ export class Player {
     _fwd.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
     _right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
 
-    if (inp.justPressed('KeyR')) { this.respawn(); return; }
+    if (this.allowRespawnKey && inp.justPressed('KeyR')) { this.respawn(); return; }
 
     if (this.mantle) {
       this._updateMantle(dt);
@@ -308,18 +309,18 @@ export class Player {
       return;
     }
 
-    const fwdIn = (inp.down('KeyW') ? 1 : 0) - (inp.down('KeyS') ? 1 : 0);
-    const strafeIn = (inp.down('KeyD') ? 1 : 0) - (inp.down('KeyA') ? 1 : 0);
+    const fwdIn = (inp.action('forward') ? 1 : 0) - (inp.action('back') ? 1 : 0);
+    const strafeIn = (inp.action('right') ? 1 : 0) - (inp.action('left') ? 1 : 0);
     _wish.set(0, 0, 0).addScaledVector(_fwd, fwdIn).addScaledVector(_right, strafeIn);
     if (_wish.lengthSq() > 0) _wish.normalize();
 
     this.coyote -= dt;
     this.jumpBufferT -= dt;
     this.wallJumpCd -= dt;
-    if (inp.justPressed('Space')) this.jumpBufferT = C.jumpBuffer;
+    if (inp.actionPressed('jump')) this.jumpBufferT = C.jumpBuffer;
 
     // ---- hide stance: hold C on the ground -> crouch, stop, light off
-    const crouchHeld = inp.down('KeyC');
+    const crouchHeld = inp.action('hide');
     this.hiding = crouchHeld && this.grounded;
     const hSpeed = Math.hypot(this.vel.x, this.vel.z);
 
@@ -344,7 +345,7 @@ export class Player {
     }
 
     // ---- sprint & stamina
-    this.sprinting = inp.down('ShiftLeft') && fwdIn > 0 && !this.crouched && !this.exhausted;
+    this.sprinting = inp.action('sprint') && fwdIn > 0 && !this.crouched && !this.exhausted;
     if (this.hiding) { _wish.set(0, 0, 0); this.jumpBufferT = 0; }
     if (this.sprinting && hSpeed > 1 && this.grounded) {
       this.stamina -= dt / C.staminaDuration;

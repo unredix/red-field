@@ -319,7 +319,7 @@ export class PropKit {
 
   // Instanced scatter split into spatial chunks so off-screen / far chunks are culled.
   // items: [{ x, z, y, rx, ry, rz, sx, sy, sz, r, g, b }]
-  _instancedChunks(geo, mat, items, { chunk = 20, castShadow = false, far = 50 } = {}) {
+  _instancedChunks(geo, mat, items, { chunk = 20, castShadow = false, far = 50, kind = 'other' } = {}) {
     const buckets = new Map();
     for (const it of items) {
       const key = `${Math.floor(it.x / chunk)},${Math.floor(it.z / chunk)}`;
@@ -328,6 +328,9 @@ export class PropKit {
     }
     const col = new THREE.Color();
     for (const list of buckets.values()) {
+      // shuffle so any prefix is an even subsample (graphics quality draws only the first N)
+      // (Math.random, not this.rnd, so the seeded map layout stays the same)
+      for (let i = list.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [list[i], list[j]] = [list[j], list[i]]; }
       const mesh = new THREE.InstancedMesh(geo, mat, list.length);
       list.forEach((it, i) => {
         _dummy.position.set(it.x, it.y, it.z);
@@ -343,7 +346,7 @@ export class PropKit {
       mesh.receiveShadow = true;
       mesh.castShadow = castShadow;
       this.scene.add(mesh);
-      this.instChunks.push({ mesh, center: mesh.boundingSphere.center.clone(), radius: mesh.boundingSphere.radius, far });
+      this.instChunks.push({ mesh, center: mesh.boundingSphere.center.clone(), radius: mesh.boundingSphere.radius, far, baseFar: far, cap: list.length, kind, castShadow });
     }
   }
 
@@ -369,7 +372,7 @@ export class PropKit {
       }
     }
     // tall hiding grass stays visible further (it's a landmark); short grass fades in the fog early
-    this._instancedChunks(this._blade, mat, items, { chunk: hide ? 30 : 20, castShadow: hide, far: hide ? 70 : 42 });
+    this._instancedChunks(this._blade, mat, items, { chunk: hide ? 30 : 20, castShadow: hide, far: hide ? 70 : 42, kind: hide ? 'tallGrass' : 'grass' });
   }
 
   // Broad red leaves (instanced). list = [[x, z, scale]]
@@ -778,10 +781,23 @@ export class PropKit {
     }
   }
 
+  // Graphics quality: thin out grass, pull in cull distances, drop grass shadows.
+  setQuality({ density = 1, farMul = 1, cullMul = 1, grassShadow = true } = {}) {
+    this.cullDist = 85 * cullMul;
+    for (const c of this.instChunks) {
+      c.far = c.baseFar * farMul;
+      if (c.kind === 'grass') c.mesh.count = Math.max(1, Math.floor(c.cap * density));
+      else if (c.kind === 'tallGrass') {
+        c.mesh.count = Math.max(1, Math.floor(c.cap * Math.max(density, 0.7))); // it's a hiding spot; keep it thick
+        c.mesh.castShadow = c.castShadow && grassShadow;
+      }
+    }
+  }
+
   update(time, camPos) {
     for (const m of this._grassMats) if (m.userData.shader) m.userData.shader.uniforms.uTime.value = time;
     if (!camPos) return;
-    this.batcher.cull(camPos, 85);
+    this.batcher.cull(camPos, this.cullDist ?? 85);
     for (const c of this.instChunks) c.mesh.visible = c.center.distanceTo(camPos) - c.radius < c.far;
   }
 }
