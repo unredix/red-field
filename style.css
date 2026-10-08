@@ -191,7 +191,16 @@ body.cinematic #hud, body.cinematic #chase { display: none; }
 }
 .panel button:hover { background: rgba(110,20,20,0.8); border-color: #b44; }
 .panel button.small { font-size: 11px; padding: 4px 10px; }
-#menu-settings { cursor: default; background: rgba(0,0,0,0.6); border: 1px solid #311; max-height: 94vh; overflow-y: auto; }
+#menu-settings, #menu-tutorial { cursor: default; background: rgba(0,0,0,0.6); border: 1px solid #311; max-height: 94vh; overflow-y: auto; }
+#menu-tutorial { max-width: 720px; }
+#tutorial { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; margin-bottom: 16px; text-align: left; }
+#tutorial section { border: 1px solid #311; background: rgba(40,5,5,0.35); padding: 10px 12px; }
+#tutorial h3 { margin: 0 0 6px; color: #d88; }
+#tutorial h3 span { color: #733; margin-right: 6px; }
+#tutorial p { font-size: 13px; line-height: 1.5; color: #bbb; margin: 0; }
+#tutorial p + p { margin-top: 5px; }
+#tutorial b { color: #fff; font-weight: normal; }
+#tutorial kbd { font: inherit; font-size: 12px; color: #fff; border: 1px solid #733; background: rgba(60,10,10,0.6); padding: 0 5px; }
 .set-row { display: flex; align-items: center; justify-content: center; gap: 14px; margin-bottom: 4px; }
 .seg { display: inline-flex; }
 .seg button { border-right-width: 0; }

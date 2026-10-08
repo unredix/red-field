@@ -672,7 +672,7 @@ function clawDenied() {
 
 function checkHints() {
   const k = (a) => keyLabel(input.binds[a]);
-  if (player.exhausted) hints.show('stamina', 'Out of breath. Stamina refills when you stop sprinting.');
+  if (player.exhausted) hints.show('stamina', 'Out of breath. Sprinting and jumping use stamina; it refills when you stop.');
   if (monster) {
     const d = Math.hypot(monster.pos.x - player.pos.x, monster.pos.z - player.pos.z);
     if (monster.awareness > 0.35) hints.show('aware', () => `The eye means it's noticing you. Hold ${k('hide')} to hide: your light goes dark.`);

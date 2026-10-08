@@ -39,6 +39,8 @@ export const PLAYER_CONFIG = {
   staminaDuration: 5.5, // seconds of continuous sprint
   staminaRegen: 3.5,    // seconds to refill from empty
   staminaRecover: 0.35, // fraction required after exhaustion
+  jumpStamina: 0.1,     // each jump / wall jump costs a tenth of the bar
+  jumpRegenDelay: 0.6,  // and pauses the refill for a moment
 
   mouseSensitivity: 0.0022,
   baseFov: 76,
@@ -93,6 +95,7 @@ export class Player {
     this.wallSide = 0;
     this.wallJumpCd = 0;
     this.stamina = 1;
+    this.staminaDelay = 0;
     this.exhausted = false;
     this.sprinting = false;
     this.mantle = null;
@@ -350,7 +353,7 @@ export class Player {
     if (this.sprinting && hSpeed > 1 && this.grounded) {
       this.stamina -= dt / C.staminaDuration;
       if (this.stamina <= 0) { this.stamina = 0; this.exhausted = true; }
-    } else if (!this.sprinting) {
+    } else if (!this.sprinting && (this.staminaDelay -= dt) <= 0) {
       this.stamina = Math.min(1, this.stamina + dt / C.staminaRegen);
       if (this.exhausted && this.stamina >= C.staminaRecover) this.exhausted = false;
     }
@@ -393,7 +396,12 @@ export class Player {
         this.wallRunTime = 0; // new wall, new run
         jumped = true;
       }
-      if (jumped) { this.jumpBufferT = 0; this.coyote = 0; this.grounded = false; }
+      if (jumped) {
+        this.jumpBufferT = 0; this.coyote = 0; this.grounded = false;
+        this.stamina = Math.max(0, this.stamina - C.jumpStamina);
+        this.staminaDelay = C.jumpRegenDelay;
+        if (this.stamina <= 0) this.exhausted = true;
+      }
     }
 
     // ---- accelerate

@@ -45,7 +45,7 @@ Best times are saved separately for classic and random maps.
 | Input | Action |
 |---|---|
 | WASD / Shift | Move / sprint (sprinting is loud) |
-| Space | Jump · wall jump |
+| Space | Jump · wall jump (each jump costs 10% stamina) |
 | Hold C | **Hide**: you crouch and freeze, and your flashlight goes dark. The light is on whenever you move. Hide in tall grass to be nearly invisible. |
 | Left click | **Claw slash**: stuns the monster up close. Time it to **parry** its lunge (see Attack) |
 | Right click | **Lure**: throws a glowing orb the monster chases and destroys |
@@ -59,6 +59,7 @@ All keys except Esc can be rebound in **Settings** (click a key, then press the 
 - **Graphics:** Low / Medium / High. They change resolution scale, flashlight shadows, grass density and cull distance; High is the original look. Low was about 1.7× faster than High in testing. Antialiasing (off on Low) changes after a reload. If the first 20 s run slowly, the game suggests lowering it.
 - **HUD toggles:** FPS counter, tower compass (red ✦ = asleep, purple = awake; arrows at the edge when behind you), and sound-direction arcs that show where monster sounds outside your view come from.
 - **Tips:** short first-time hints (hiding, lures, the lunge, scent, tall grass, towers, claw charges, stamina). Each shows once; "Reset tips" brings them back.
+- **How to play:** a page on the start / pause screen that explains the goal, the beast, hiding, scent, the claw, the lunge, towers and stamina (with your current key bindings).
 - **Faster flow:** the intro only auto-plays the first time ("Watch intro" replays it); R / Space / Enter retries on the death and win screens; R restarts from the pause screen; audio ducks while paused.
 - R no longer teleports you to spawn in Red Field (it still does on the test map).
 
