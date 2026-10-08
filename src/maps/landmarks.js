@@ -137,7 +137,9 @@ export const LANDMARKS = {
         kit.uprightPiano(x, z, rnd() * 6);
       }
       for (let i = 0; i < 8; i++) { const [x, z] = at(L, R(-12, 12), R(-12, 12)); kit.bassDrum(x, z, rnd() * 6); }
-      kit.fence(L.x - 13, L.z - 13, L.x + 13, L.z - 13); // fences are axis aligned
+      // fences are axis aligned; put it on the side facing the map centre (not on the edge slope)
+      const fz = Math.abs(L.z - 13) < Math.abs(L.z + 13) ? L.z - 13 : L.z + 13;
+      kit.fence(L.x - 13, fz, L.x + 13, fz);
     },
   },
 };

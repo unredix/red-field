@@ -69,6 +69,8 @@ export const GATES = {
   spawnLOS: (m) => !m.spawnLOS,
   colliders: (m) => m.colliders >= 330 && m.colliders <= 420,
   genMs: (m) => m.genMs <= 2000,
+  steepProps: (m) => !(m.steepProps > 4),
+  ravineHidden: (m) => m.ravineHidden !== false,
 };
 
 export function checkMap(world, level, genMs = 0) {
@@ -95,6 +97,38 @@ export function checkMap(world, level, genMs = 0) {
   m.pathBlockers = level.pathDist
     ? world.colliders.filter((b) => !b.small && b.max.x - b.min.x < 20 && level.pathDist((b.min.x + b.max.x) / 2, (b.min.z + b.max.z) / 2) < 1.2).length
     : 0;
+  // terrain features (stage 2)
+  const tr = level.terrain;
+  if (tr) {
+    m.ridges = tr.ridges.length;
+    m.ravine = !!tr.ravine;
+    // props standing on ground steeper than ~25 degrees (they'd float or sink)
+    m.steepProps = world.colliders.filter((b) => {
+      const w = b.max.x - b.min.x, d = b.max.z - b.min.z;
+      if (w > 10 || d > 10) return false; // walls / bounds
+      return tr.slope((b.min.x + b.max.x) / 2, (b.min.z + b.max.z) / 2) > 0.6;
+    }).length;
+    // a crouched player in the ravine bed can't be seen from the bank 15 m away
+    // (sampled at the ravine's bends, from both banks; it must hide you from most directions)
+    if (tr.ravine) {
+      const pts = tr.ravine;
+      let tested = 0, hidden = 0;
+      for (let i = 1; i < pts.length - 1; i++) {
+        const [x, z] = pts[i];
+        if (Math.abs(x) > 55 || Math.abs(z) > 55 || (level.pathDist && level.pathDist(x, z) < 10)) continue;
+        const [px, pz] = pts[i + 1];
+        const len = Math.hypot(px - x, pz - z), nx = -(pz - z) / len, nz = (px - x) / len;
+        for (const side of [1, -1]) {
+          const ox = x + nx * 15 * side, oz = z + nz * 15 * side;
+          if (Math.abs(ox) > 66 || Math.abs(oz) > 66) continue;
+          tested++;
+          if (!world.lineOfSight(g({ x: ox, z: oz }, 3.5), g({ x, z }, 0.9))) hidden++;
+        }
+      }
+      m.ravineHide = tested ? Math.round((100 * hidden) / tested) : 100;
+      m.ravineHidden = m.ravineHide >= 65; // natural banks: hidden from at least two thirds of directions
+    }
+  }
   // heightFn cost per call
   const t0 = performance.now();
   let acc = 0;

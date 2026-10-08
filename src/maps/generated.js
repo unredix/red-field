@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { PropKit } from '../props.js';
 import { mulberry32 } from '../world.js';
-import { buildTerrain, buildBackdrop, buildEmbers, makePathDist, makePlacer, smooth, bakeField } from './common.js';
+import { buildTerrain, buildBackdrop, buildEmbers, makePathDist, makePlacer, smooth, bakeField, makeNoise } from './common.js';
 import { LANDMARKS } from './landmarks.js';
 import { deepPockets } from './mapcheck.js';
 
@@ -9,8 +9,9 @@ import { deepPockets } from './mapcheck.js';
 //   1. layout: spawn on an edge, 3 towers >= 60 m apart, 2 blood pools covering
 //      the towers, 3 random landmarks
 //   2. mud paths: minimum spanning tree between all of them, with wobbly midpoints
-//   3. terrain: rolling hills with seeded phases, flattened under set pieces,
-//      baked into a heightfield (cheap lookups at runtime)
+//   3. terrain: warped fractal hills with flat and rough areas, 1-2 rocky ridges,
+//      maybe a dry blood-creek ravine (cover from sight) with fords where paths
+//      cross; flattened under set pieces and baked into a heightfield
 //   4. props: landmarks, filler up to a fixed density budget, tall grass spread
 //      evenly (farthest-point), then pockets the monster can't reach are opened up
 //   5. the monster spawns far away, out of sight of the player
@@ -20,8 +21,10 @@ const HALF = 70;
 const PATH_C = new THREE.Color(0.55, 0.36, 0.3);
 const BLOOD_C = new THREE.Color(0.55, 0.12, 0.1);
 const STONE_C = new THREE.Color(0.5, 0.36, 0.34);
+const RAVINE_C = new THREE.Color(0.34, 0.08, 0.06);
+const MAX_SLOPE = 0.47; // props avoid ground steeper than ~25 degrees
 const DENSITY = 335;       // collider budget before the towers (classic map: ~426 in total)
-const GRASS_PATCHES = 27;  // tall hiding grass
+const GRASS_PATCHES = 29;  // tall hiding grass
 
 export function buildGenerated(scene, world, seed) {
   const timings = {}, t0 = performance.now();
@@ -47,9 +50,56 @@ export function buildGenerated(scene, world, seed) {
     if (score >= 75) break;
   }
 
+  // terrain features come first (they only avoid the towers and spawn); pools and
+  // landmarks are then placed clear of them
+  const keepOut = [...towers.map((tw) => [tw, 17]), [spawn, 13]];
+  const along = (pts, step = 3) => {
+    const out = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const [ax, az] = pts[i], [bx, bz] = pts[i + 1], n = Math.ceil(Math.hypot(bx - ax, bz - az) / step);
+      for (let k = 0; k < n; k++) out.push([ax + ((bx - ax) * k) / n, az + ((bz - az) * k) / n]);
+    }
+    out.push(pts.at(-1));
+    return out;
+  };
+  const clearOf = (pts, extra) => along(pts).every(([x, z]) => keepOut.every(([o, rr]) => Math.hypot(x - o.x, z - o.z) > rr + extra));
+
+  // ridges: 1-2 long hills with rocky crests that block the view across the map
+  const ridges = [];
+  for (let n = 0, want = rnd() < 0.5 ? 2 : 1; n < want; n++) {
+    for (let i = 0; i < 80; i++) {
+      const cx = R(-48, 48), cz = R(-48, 48), a = R(0, Math.PI), len = R(35, 60);
+      const dx = Math.cos(a), dz = Math.sin(a), pts = [];
+      for (let j = 0; j <= 4; j++) {
+        const u = j / 4 - 0.5, off = R(-6, 6);
+        pts.push([cx + dx * len * u - dz * off, cz + dz * len * u + dx * off]);
+      }
+      if (pts.some(([x, z]) => Math.abs(x) > HALF - 8 || Math.abs(z) > HALF - 8) || !clearOf(pts, 7)) continue;
+      if (ridges.some((q) => along(pts).some(([x, z]) => q.dist(x, z) < 22))) continue;
+      ridges.push({ pts, h: R(3, 5.5), w: R(7, 10), dist: makePathDist([pts]) });
+      break;
+    }
+  }
+  // ravine: a dry, blood-stained creek bed from edge to edge; crouching in it hides you
+  let ravine = null;
+  if (rnd() < 0.7) {
+    for (let i = 0; i < 80 && !ravine; i++) {
+      const vertical = rnd() < 0.5, a0 = R(-45, 45), a1 = R(-45, 45), pts = [];
+      for (let j = 0; j <= 6; j++) {
+        const u = -HALF - 4 + ((HALF * 2 + 8) * j) / 6, v = a0 + (a1 - a0) * (j / 6) + (j % 6 ? R(-12, 12) : 0);
+        pts.push(vertical ? [v, u] : [u, v]);
+      }
+      if (!clearOf(pts, 6)) continue;
+      // deep with a narrow crest: a crouched player is out of the monster's sight from ~13 m
+      ravine = { pts, depth: R(3.3, 3.9), w: R(4.6, 5.3), dist: makePathDist([pts]) };
+    }
+  }
+
   const occupied = [[spawn, 8], ...towers.map((tw) => [tw, 13])];
   const free = (p, r) => occupied.every(([o, orr]) => dist(o, p) > orr + r);
   const claimArea = (p, r) => occupied.push([p, r]);
+  for (const q of ridges) for (const [x, z] of along(q.pts, 4)) claimArea({ x, z }, q.w * 0.6);
+  if (ravine) for (const [x, z] of along(ravine.pts, 4)) claimArea({ x, z }, ravine.w + 1);
 
   // blood pools: two (a smaller third if needed), placed so every tower has one within ~55 m
   const pools = [];
@@ -121,24 +171,61 @@ export function buildGenerated(scene, world, seed) {
 
   mark('layout');
   // ------------------------------------------------------------------ 3. terrain
-  const ph = Array.from({ length: 7 }, () => R(0, Math.PI * 2));
-  const fq = Array.from({ length: 4 }, () => R(0.85, 1.15));
-  const hill = R(0.8, 1.35);
-  const flats = [
-    ...towers.map((tw) => ({ x: tw.x, z: tw.z, y: 0.3, r1: 10, r2: 15 })),
-    ...pools.map((p) => ({ x: p.x, z: p.z, y: 0, r1: 6.5, r2: 11.5 })),
-    { x: spawn.x, z: spawn.z, y: 0.2, r1: 4, r2: 9 },
-    ...landmarks.filter((L) => LANDMARKS[L.type].flat).map((L) => ({ x: L.x, z: L.z, ...LANDMARKS[L.type].flat })),
-  ];
-  const rawHeight = (x, z) => {
-    let h = hill * (1.3 * Math.sin(x * 0.03 * fq[0] + ph[0]) * Math.cos(z * 0.027 * fq[1] + ph[1])
-      + 0.9 * Math.sin(x * 0.09 * fq[2] + ph[2]) * Math.cos(z * 0.075 * fq[3] + ph[3]))
-      + 0.5 * Math.sin(x * 0.19 + z * 0.13 + ph[4])
-      + 0.25 * Math.sin(z * 0.31 - x * 0.07 + ph[5])
-      + 0.12 * Math.sin(x * 0.53 + z * 0.41 + ph[6]);
+  const { noise, fbm } = makeNoise(rnd);
+  const hill = R(0.85, 1.25);
+  const relief = (x, z) => {
+    // warped fractal hills; a slow "roughness" field makes some areas flat and some hilly
+    const wx = x + 10 * noise(x * 0.012 + 3.1, z * 0.012), wz = z + 10 * noise(x * 0.012, z * 0.012 + 7.7);
+    const rough = 0.45 + 0.9 * (0.5 + 0.5 * noise(x * 0.009 + 11.3, z * 0.009 - 4.2));
+    let h = hill * rough * 4 * fbm(wx * 0.022, wz * 0.022, 4);
+    for (const q of ridges) {
+      const d = q.dist(x, z);
+      if (d < q.w) h += q.h * (1 - smooth(0, q.w, d)) * (0.75 + 0.25 * noise(x * 0.08, z * 0.08));
+    }
+    if (ravine) {
+      const d = ravine.dist(x, z);
+      if (d < ravine.w + 4) { // fords where a path crosses
+        const ford = 1 - 0.65 * (1 - smooth(2, 7, pathDist(x, z)));
+        h -= ravine.depth * ford * (1 - smooth(1.3, ravine.w, d));
+        // a low berm of thrown-up earth along both banks keeps the downhill side high enough to hide in
+        h += 1.3 * ford * smooth(ravine.w - 1.5, ravine.w + 0.5, d) * (1 - smooth(ravine.w + 0.5, ravine.w + 4, d));
+      }
+    }
     h -= 0.25 * (1 - smooth(0, 2.5, pathDist(x, z)));
     const e = Math.max(Math.abs(x), Math.abs(z)) - (HALF - 5);
     if (e > 0) h += e * e * 0.09;
+    return h;
+  };
+
+  // sometimes a blood pool collects in the ravine bed
+  if (ravine && rnd() < 0.5) {
+    const pts = along(ravine.pts, 4).filter(([x, z]) => Math.abs(x) < HALF - 14 && Math.abs(z) < HALF - 14 && pathDist(x, z) > 9);
+    for (let i = 0; i < 20 && pts.length; i++) {
+      const [x, z] = pts[Math.floor(rnd() * pts.length)];
+      const p = { x, z };
+      if (!free(p, 7) || pools.some((q) => dist(q, p) < 20)) continue;
+      p.w = R(6, 7.5); p.d = R(4, 5); p.inRavine = true;
+      p.y = relief(x, z);
+      pools.push(p); claimArea(p, 7);
+      break;
+    }
+  }
+
+  const flats = [
+    ...towers.map((tw) => ({ x: tw.x, z: tw.z, y: 0.3, r1: 10, r2: 15 })),
+    ...pools.map((p) => (p.inRavine ? { x: p.x, z: p.z, y: p.y, r1: 4.5, r2: 7 } : { x: p.x, z: p.z, y: 0, r1: 6.5, r2: 11.5 })),
+    { x: spawn.x, z: spawn.z, y: 0.2, r1: 4, r2: 9 },
+    ...landmarks.map((L) => {
+      const f = LANDMARKS[L.type].flat;
+      const r = LANDMARKS[L.type].r;
+      if (f) return { x: L.x, z: L.z, ...f };
+      // a soft base that stops short of the ravine (otherwise it would fill it in)
+      const r2 = Math.min(r + 6, ravine ? ravine.dist(L.x, L.z) - ravine.w - 1 : Infinity);
+      return { x: L.x, z: L.z, y: relief(L.x, L.z), r1: Math.min(r * 0.6, r2 - 4), r2 };
+    }),
+  ];
+  const rawHeight = (x, z) => {
+    let h = relief(x, z);
     for (const f of flats) {
       const d = Math.hypot(x - f.x, z - f.z);
       if (d < f.r2) h = f.y + (h - f.y) * smooth(f.r1, f.r2, d);
@@ -154,7 +241,12 @@ export function buildGenerated(scene, world, seed) {
     c.lerp(PATH_C, 1 - smooth(1.2, 2.8, pathDist(x, z)));
     for (const p of pools) c.lerp(BLOOD_C, (1 - smooth(4, 9, Math.hypot(x - p.x, z - p.z))) * 0.7);
     for (const y of yards) c.lerp(STONE_C, (1 - smooth(8, 14, Math.hypot(x - y.x, z - y.z))) * 0.6);
+    for (const q of ridges) c.lerp(STONE_C, (1 - smooth(0, q.w * 0.45, q.dist(x, z))) * 0.35); // rocky crests
+    if (ravine) c.lerp(RAVINE_C, (1 - smooth(1, ravine.w * 0.8, ravine.dist(x, z))) * 0.75);
   };
+  // ground steepness (rise per metre)
+  const slope = (x, z) => Math.hypot(heightFn(x + 0.8, z) - heightFn(x - 0.8, z), heightFn(x, z + 0.8) - heightFn(x, z - 0.8)) / 1.6;
+  const flatEnough = (x, z, r) => slope(x, z) < MAX_SLOPE && (r < 1.2 || [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([a, b]) => slope(x + a * r * 0.7, z + b * r * 0.7) < MAX_SLOPE));
 
   world.heightFn = heightFn;
   scene.fog = new THREE.FogExp2(0x1c0404, 0.032);
@@ -173,7 +265,7 @@ export function buildGenerated(scene, world, seed) {
     ...towers.map((tw) => [tw.x, tw.z, 11]),
     ...pools.map((p) => [p.x, p.z, Math.max(p.w, p.d) / 2 + 2]),
   ];
-  const { R: KR, clear, claim, scatter, solids } = makePlacer({ rnd: krnd, half: HALF, reserved, pathDist });
+  const { R: KR, clear, claim, scatter, solids } = makePlacer({ rnd: krnd, half: HALF, reserved, pathDist, ok: flatEnough });
 
   // invisible walls + the rock ring just outside them
   world.addCollider(-HALF - 1, -10, -HALF - 1, HALF + 1, 30, -HALF);
@@ -214,6 +306,17 @@ export function buildGenerated(scene, world, seed) {
     LANDMARKS[L.type].build(ctx, L);
   }
   for (const L of landmarks) reserved.push([L.x, L.z, L.r]);
+
+  // rocky outcrops along the ridge crests
+  for (const q of ridges) {
+    for (const [x, z] of along(q.pts, 6)) {
+      if (krnd() < 0.35) continue;
+      const bx = x + KR(-1.5, 1.5), bz = z + KR(-1.5, 1.5);
+      if (!clear(bx, bz, 1.6, 1.5)) continue;
+      claim(bx, bz, 1.6);
+      kit.boulder(bx, bz, KR(1.3, 2.4), KR(1.2, 2.3), KR(1.3, 2.4), krnd() * 6);
+    }
+  }
 
   // filler in the classic proportions until the density budget is reached
   // (so maps with sparse landmarks don't end up emptier)
@@ -361,6 +464,7 @@ export function buildGenerated(scene, world, seed) {
     intro,
     pathDist,
     timings: { ...timings, total: Math.round(performance.now() - t0) },
+    terrain: { ridges: ridges.map((q) => q.pts), ravine: ravine && ravine.pts, slope },
     layout: { spawn, towers, monster, pools, landmarks: landmarks.map((L) => L.type), paths: paths.length, grassPatches: patches.length, opened },
     stats: { chunks, colliders: world.colliders.length },
     setQuality: (q) => kit.setQuality(q),

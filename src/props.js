@@ -108,7 +108,7 @@ export class PropKit {
   bake() { return this.batcher.bake(); }
 
   _colliderFrom(obj, shrink = 1, topScale = 1) {
-    obj.updateMatrixWorld(true);
+    obj.updateWorldMatrix(true, true); // parents too: a part of a group must use the group's placement
     const b = new THREE.Box3().setFromObject(obj);
     const cx = (b.min.x + b.max.x) / 2, cz = (b.min.z + b.max.z) / 2;
     const hx = ((b.max.x - b.min.x) / 2) * shrink, hz = ((b.max.z - b.min.z) / 2) * shrink;

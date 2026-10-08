@@ -50,6 +50,28 @@ export function bakeField(fn, extent, cell = 0.5) {
 
 export const bakeHeight = bakeField;
 
+// Seeded 2D value noise in [-1, 1] (smooth, tileless) and a fractal sum of it.
+export function makeNoise(rnd) {
+  const N = 256, mask = N - 1;
+  const perm = new Uint8Array(N * 2), val = new Float32Array(N);
+  for (let i = 0; i < N; i++) { perm[i] = i; val[i] = rnd() * 2 - 1; }
+  for (let i = N - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [perm[i], perm[j]] = [perm[j], perm[i]]; }
+  for (let i = 0; i < N; i++) perm[N + i] = perm[i];
+  const at = (i, j) => val[perm[perm[i & mask] + (j & mask)]];
+  const noise = (x, z) => {
+    const xi = Math.floor(x), zi = Math.floor(z), xf = x - xi, zf = z - zi;
+    const u = xf * xf * (3 - 2 * xf), v = zf * zf * (3 - 2 * zf);
+    const a = at(xi, zi), b = at(xi + 1, zi), c = at(xi, zi + 1), d = at(xi + 1, zi + 1);
+    return (a + (b - a) * u) * (1 - v) + (c + (d - c) * u) * v;
+  };
+  const fbm = (x, z, oct = 4) => {
+    let s = 0, amp = 0.5, f = 1, norm = 0;
+    for (let o = 0; o < oct; o++) { s += amp * noise(x * f, z * f); norm += amp; amp *= 0.5; f *= 2.03; }
+    return s / norm;
+  };
+  return { noise, fbm };
+}
+
 // Distance to the nearest of a set of polylines ([[x, z], ...]).
 export function makePathDist(paths) {
   return (x, z) => {
@@ -68,11 +90,12 @@ export function makePathDist(paths) {
 }
 
 // Placement bookkeeping: reserved discs + spacing between solid props.
-export function makePlacer({ rnd, half, reserved = [], pathDist = () => Infinity }) {
+export function makePlacer({ rnd, half, reserved = [], pathDist = () => Infinity, ok = null }) {
   const R = (a, b) => a + rnd() * (b - a);
   const solids = [];
   const clear = (x, z, r, spacing = 1) => {
     if (Math.abs(x) > half - 3 || Math.abs(z) > half - 3) return false;
+    if (ok && !ok(x, z, r)) return false; // e.g. too steep
     for (const [rx, rz, rr] of reserved) if ((x - rx) ** 2 + (z - rz) ** 2 < (rr + r) ** 2) return false;
     for (const [sx, sz, sr] of solids) if ((x - sx) ** 2 + (z - sz) ** 2 < (sr + r + spacing) ** 2) return false;
     return true;
