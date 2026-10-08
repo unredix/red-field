@@ -23,13 +23,20 @@ then open http://localhost:8080 and click. `?map=test` loads the old movement te
 Pick the map on the start / pause screen:
 
 - **Red Field (classic):** the hand-made map, unchanged (also tagged `classic-map-v1` in git).
-- **Random:** a seeded generated map (`src/maps/generated.js`), the same 140 × 140 m size and prop budget:
-  - spawn on an edge, 3 towers spread far apart, the monster far from you;
-  - 1–2 blood pools (always at least one for washing your scent);
-  - 3 random landmarks from: chapel graveyard, orchestra clearing, dead forest, boulder canyon, junkyard (`src/maps/landmarks.js`);
-  - mud paths linking everything, rolling terrain, tall-grass hiding patches.
+- **Random:** a seeded generated map (`src/maps/generated.js`), the same 140 × 140 m size and prop budget as classic:
+  - **Layout:** spawn on an edge; 3 towers at least 60 m apart; 2–4 blood pools so every tower has one within 55 m; the monster starts far away and out of your sight.
+  - **Terrain:** warped fractal hills (flat in fields, hilly in rocky areas), 1–2 ridges with rocky crests that block sightlines, and on 70% of maps a dry blood-creek ravine. Crouch in the ravine to hide: a crouched player there is out of the monster's sight from 83–100% of directions at 15 m. Paths cross the ravine at shallow fords.
+  - **Biomes:** the map is split into 6–8 zones of 5 types, each with its own ground and grass colour, hilliness, props and density:
+    - **field:** open, sparse crosses;
+    - **graves:** crosses and tombstones;
+    - **deadwood:** dense dead trees with dolls;
+    - **junk:** instruments, drums, speaker stacks;
+    - **rocks:** boulders, hilly, thin grass.
+  - **Landmarks:** 3 from chapel graveyard, orchestra clearing, dead forest, boulder canyon, junkyard (`src/maps/landmarks.js`). Each forces its own biome around it.
+  - **Fairness:** tall-grass hiding patches are spread evenly (never more than about 22 m from cover). Pockets the monster couldn't reach (possible safe spots) are opened by removing a boulder.
   - **Seeds:** the same seed always gives the same map. **New seed** or **N** on the death / win screen rolls a new one; **Copy link** shares it (`?map=random&seed=123`).
   - Every map is checked at load: if the monster couldn't reach a tower or your spawn, the next seed is used.
+  - **Dev checks:** `await game.sweep(1, 50)` builds seeds off-screen and checks them against quality gates (`src/maps/mapcheck.js`). `game.topView()` toggles an overhead view.
 
 Best times are saved separately for classic and random maps.
 
@@ -128,7 +135,8 @@ The monster is 1.5× the original size.
   - Player: a heartbeat and ambient sound.
 - `src/maps/redfield.js`: the classic 140 × 140 m map.
 - `src/maps/generated.js`, `src/maps/landmarks.js`: the seeded random map and its set pieces.
-- `src/maps/common.js`: terrain, sky, embers, path and placement helpers shared by both.
+- `src/maps/common.js`: terrain, sky, embers, baked height/distance fields, value noise, path and placement helpers shared by both.
+- `src/maps/mapcheck.js`: quality checks for generated maps (used by `game.sweep()`).
 - `src/fx.js`: pooled spark bursts.
   - **Centre:** the blood pool, the shed and the piano.
   - **North:** a fenced graveyard with a ruined chapel. Its big front door fits the monster, its back door doesn't, and you can vault through its windows.

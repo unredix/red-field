@@ -383,6 +383,7 @@ export class PropKit {
         if (zn.avoid && zn.avoid(x, z)) continue;
         const h = zn.hMin + this.rnd() * (zn.hMax - zn.hMin);
         c.setHSL(0.99 + this.rnd() * 0.02, 0.7, 0.18 + this.rnd() * 0.12);
+        if (zn.tint) zn.tint(x, z, c); // optional per-area colour (generated maps: biome tint)
         items.push({
           x, z, y: this.g(x, z) - 0.05, rx: (this.rnd() - 0.5) * 0.3, ry: this.rnd() * Math.PI * 2, rz: (this.rnd() - 0.5) * 0.3,
           sx: 1 + this.rnd(), sy: h, sz: 1, r: c.r, g: c.g, b: c.b,
@@ -457,13 +458,15 @@ export class PropKit {
   }
 
   // Axis-aligned broken fence (0.85 m: you jump it, the monster steps over it).
-  fence(x1, z1, x2, z2) {
+  // skip(x, z): optional, true = leave that section out (generated maps: steep ground)
+  fence(x1, z1, x2, z2, skip = null) {
     const len = Math.hypot(x2 - x1, z2 - z1), n = Math.max(1, Math.round(len / 2));
     const alongX = Math.abs(x2 - x1) > Math.abs(z2 - z1);
     for (let i = 0; i < n; i++) {
       if (this.rnd() < 0.18) continue; // missing sections
       const t0 = i / n, t1 = (i + 1) / n;
       const ax = x1 + (x2 - x1) * t0, az = z1 + (z2 - z1) * t0, bx = x1 + (x2 - x1) * t1, bz = z1 + (z2 - z1) * t1;
+      if (skip && skip((ax + bx) / 2, (az + bz) / 2)) continue;
       const g = this.g((ax + bx) / 2, (az + bz) / 2);
       const grp = new THREE.Group();
       const post = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.0, 0.12), this.mat.wood);

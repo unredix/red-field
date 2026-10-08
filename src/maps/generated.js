@@ -12,9 +12,12 @@ import { deepPockets } from './mapcheck.js';
 //   3. terrain: warped fractal hills with flat and rough areas, 1-2 rocky ridges,
 //      maybe a dry blood-creek ravine (cover from sight) with fords where paths
 //      cross; flattened under set pieces and baked into a heightfield
-//   4. props: landmarks, filler up to a fixed density budget, tall grass spread
+//   4. zones: the map is split into 6-8 biome regions (field, graves, deadwood,
+//      junk, rocks); landmarks force their own. Each zone has its own ground
+//      tint, hilliness, prop palette and density
+//   5. props: landmarks, zone filler up to a fixed density budget, tall grass spread
 //      evenly (farthest-point), then pockets the monster can't reach are opened up
-//   5. the monster spawns far away, out of sight of the player
+//   6. the monster spawns far away, out of sight of the player
 // The same seed always builds the same map.
 
 const HALF = 70;
@@ -23,6 +26,23 @@ const BLOOD_C = new THREE.Color(0.55, 0.12, 0.1);
 const STONE_C = new THREE.Color(0.5, 0.36, 0.34);
 const RAVINE_C = new THREE.Color(0.34, 0.08, 0.06);
 const MAX_SLOPE = 0.47; // props avoid ground steeper than ~25 degrees
+
+// Biomes. tint/tintK: ground colour; rough: hill height factor; density: how
+// much filler (relative); palette: [prop, weight]; grass: short grass kept (0..1).
+const ZONES = {
+  field:    { tint: new THREE.Color(1.05, 0.34, 0.3), tintK: 0.2, rough: 0.6, density: 0.45, grass: 1,
+              palette: [['cross', 5], ['instrument', 3], ['boulder', 1], ['bassDrum', 1]] },
+  graves:   { tint: new THREE.Color(0.62, 0.4, 0.38), tintK: 0.45, rough: 0.85, density: 1.3, grass: 0.85,
+              palette: [['cross', 4], ['tombstone', 5], ['tree', 1], ['boulder', 0.5]] },
+  deadwood: { tint: new THREE.Color(0.5, 0.24, 0.17), tintK: 0.5, rough: 1, density: 1.25, grass: 0.75,
+              palette: [['tree', 6], ['boulder', 3], ['cross', 1]] },
+  junk:     { tint: new THREE.Color(0.95, 0.42, 0.22), tintK: 0.4, rough: 0.9, density: 1, grass: 0.8,
+              palette: [['instrument', 4], ['bassDrum', 2], ['speakers', 1.5], ['cross', 1], ['boulder', 1.5]] },
+  rocks:    { tint: new THREE.Color(0.58, 0.43, 0.41), tintK: 0.45, rough: 1.55, density: 1, grass: 0.5,
+              palette: [['boulder', 7], ['cross', 1], ['tree', 1.5]] },
+};
+const ZONE_TYPES = Object.keys(ZONES);
+const _tint = new THREE.Color();
 const DENSITY = 335;       // collider budget before the towers (classic map: ~426 in total)
 const GRASS_PATCHES = 29;  // tall hiding grass
 
@@ -135,6 +155,30 @@ export function buildGenerated(scene, world, seed) {
     }
   }
 
+  // ------------------------------------------------------------------ zones (biomes)
+  // landmarks force their zone; the rest are spread out, unused types first
+  const zones = landmarks.map((L) => ({ x: L.x, z: L.z, type: LANDMARKS[L.type].zone }));
+  const want = 6 + Math.floor(rnd() * 3);
+  for (let i = 0; i < 300 && zones.length < want; i++) {
+    const p = { x: R(-60, 60), z: R(-60, 60), type: null };
+    if (zones.every((q) => dist(q, p) >= 30)) zones.push(p);
+  }
+  for (const zn of zones) {
+    if (zn.type) continue;
+    const unused = ZONE_TYPES.filter((ty) => !zones.some((q) => q.type === ty));
+    const from = unused.length ? unused : ZONE_TYPES;
+    zn.type = from[Math.floor(rnd() * from.length)];
+  }
+  // nearest zone, the next one, and how much to blend towards it near the border (0..0.5)
+  const zoneAt = (x, z) => {
+    let a = zones[0], da = Infinity, b = zones[0], db = Infinity;
+    for (const zn of zones) {
+      const d = (x - zn.x) ** 2 + (z - zn.z) ** 2;
+      if (d < da) { b = a; db = da; a = zn; da = d; } else if (d < db) { b = zn; db = d; }
+    }
+    return { a: ZONES[a.type], b: ZONES[b.type], type: a.type, mix: 0.5 * (1 - smooth(0, 7, Math.sqrt(db) - Math.sqrt(da))) };
+  };
+
   // ------------------------------------------------------------------ 2. paths (MST, Prim)
   const nodes = [spawn, ...towers, ...pools];
   for (const L of landmarks) {
@@ -176,7 +220,9 @@ export function buildGenerated(scene, world, seed) {
   const relief = (x, z) => {
     // warped fractal hills; a slow "roughness" field makes some areas flat and some hilly
     const wx = x + 10 * noise(x * 0.012 + 3.1, z * 0.012), wz = z + 10 * noise(x * 0.012, z * 0.012 + 7.7);
-    const rough = 0.45 + 0.9 * (0.5 + 0.5 * noise(x * 0.009 + 11.3, z * 0.009 - 4.2));
+    const zn = zoneAt(x, z);
+    const zoneRough = zn.a.rough + (zn.b.rough - zn.a.rough) * zn.mix; // rocky zones are hillier, fields flatter
+    const rough = (0.45 + 0.9 * (0.5 + 0.5 * noise(x * 0.009 + 11.3, z * 0.009 - 4.2))) * zoneRough;
     let h = hill * rough * 4 * fbm(wx * 0.022, wz * 0.022, 4);
     for (const q of ridges) {
       const d = q.dist(x, z);
@@ -188,7 +234,7 @@ export function buildGenerated(scene, world, seed) {
         const ford = 1 - 0.65 * (1 - smooth(2, 7, pathDist(x, z)));
         h -= ravine.depth * ford * (1 - smooth(1.3, ravine.w, d));
         // a low berm of thrown-up earth along both banks keeps the downhill side high enough to hide in
-        h += 1.3 * ford * smooth(ravine.w - 1.5, ravine.w + 0.5, d) * (1 - smooth(ravine.w + 0.5, ravine.w + 4, d));
+        h += 1.5 * ford * smooth(ravine.w - 1.5, ravine.w + 0.5, d) * (1 - smooth(ravine.w + 0.5, ravine.w + 4, d));
       }
     }
     h -= 0.25 * (1 - smooth(0, 2.5, pathDist(x, z)));
@@ -238,6 +284,9 @@ export function buildGenerated(scene, world, seed) {
   const groundColor = (x, z, c) => {
     const n = 0.5 + 0.5 * Math.sin(x * 0.7 + Math.sin(z * 0.5) * 2) * Math.cos(z * 0.6);
     c.setRGB(0.95 + n * 0.25, 0.32 + n * 0.08, 0.3);
+    const zn = zoneAt(x, z);
+    _tint.copy(zn.a.tint).lerp(zn.b.tint, zn.mix);
+    c.lerp(_tint, zn.a.tintK + (zn.b.tintK - zn.a.tintK) * zn.mix);
     c.lerp(PATH_C, 1 - smooth(1.2, 2.8, pathDist(x, z)));
     for (const p of pools) c.lerp(BLOOD_C, (1 - smooth(4, 9, Math.hypot(x - p.x, z - p.z))) * 0.7);
     for (const y of yards) c.lerp(STONE_C, (1 - smooth(8, 14, Math.hypot(x - y.x, z - y.z))) * 0.6);
@@ -300,7 +349,7 @@ export function buildGenerated(scene, world, seed) {
   });
 
   // landmarks, then keep the filler out of them
-  const ctx = { kit, R: KR, rnd: krnd, clear, claim, pathDist, reserved };
+  const ctx = { kit, R: KR, rnd: krnd, clear, claim, pathDist, reserved, steep: (x, z) => slope(x, z) > MAX_SLOPE };
   for (const L of landmarks) {
     L.r = LANDMARKS[L.type].r;
     LANDMARKS[L.type].build(ctx, L);
@@ -318,22 +367,36 @@ export function buildGenerated(scene, world, seed) {
     }
   }
 
-  // filler in the classic proportions until the density budget is reached
-  // (so maps with sparse landmarks don't end up emptier)
-  const A = [-66, 66, -66, 66];
+  // zone filler until the density budget is reached: each spot gets a prop from
+  // its zone's palette, and dense zones (graves, deadwood) get more of them
   const types = ['guitar', 'guitar', 'violin', 'cello'];
-  for (let round = 0; round < 60 && world.colliders.length < DENSITY; round++) {
-    scatter(3, A, 0.8, 3, (x, z) => kit.cross(x, z, KR(2.6, 4.4), krnd() * 6, (krnd() - 0.5) * 0.3, krnd() < 0.8));
-    scatter(3, A, 2.4, 3, (x, z) => kit.boulder(x, z, KR(1.4, 2.8), KR(1.2, 2.8), KR(1.4, 2.8), krnd() * 6));
-    scatter(1, A, 0.6, 3, (x, z) => kit.deadTree(x, z, KR(5, 8), krnd() < 0.4));
-    for (let i = 0; i < 4; i++) {
-      const x = KR(-66, 66), z = KR(-66, 66);
-      if (!clear(x, z, 0.4, 0)) continue;
+  const PROPS = { // [radius, spacing, place]
+    cross: [0.8, 3, (x, z) => kit.cross(x, z, KR(2.6, 4.4), krnd() * 6, (krnd() - 0.5) * 0.3, krnd() < 0.8)],
+    tombstone: [0.5, 1.2, (x, z) => kit.tombstone(x, z, (krnd() - 0.5) * 0.5)],
+    tree: [0.6, 3, (x, z) => kit.deadTree(x, z, KR(5, 8.5), krnd() < 0.4)],
+    boulder: [2.4, 3, (x, z) => kit.boulder(x, z, KR(1.4, 2.8), KR(1.2, 2.8), KR(1.4, 2.8), krnd() * 6)],
+    instrument: [0.4, 0.3, (x, z) => {
       const ty = types[Math.floor(krnd() * types.length)];
       kit.instrument(ty, x, z, krnd() * 6, ty === 'cello' ? krnd() < 0.7 : krnd() < 0.25);
-    }
-    const x = KR(-64, 64), z = KR(-64, 64);
-    if (clear(x, z, 0.5, 0)) kit.bassDrum(x, z, krnd() * 6);
+    }],
+    bassDrum: [0.5, 0.3, (x, z) => kit.bassDrum(x, z, krnd() * 6)],
+    speakers: [1.2, 1.5, (x, z) => kit.speakerStack(x, z, krnd() * 6, 1 + Math.floor(krnd() * 3))],
+  };
+  const pick = (pal) => {
+    let tot = 0;
+    for (const [, w] of pal) tot += w;
+    let v = krnd() * tot;
+    for (const [k, w] of pal) if ((v -= w) <= 0) return k;
+    return pal[0][0];
+  };
+  for (let i = 0; i < 8000 && world.colliders.length < DENSITY; i++) {
+    const x = KR(-66, 66), z = KR(-66, 66);
+    const Z = ZONES[zoneAt(x, z).type];
+    if (krnd() * 1.3 > Z.density) continue;
+    const [rad, spacing, place] = PROPS[pick(Z.palette)];
+    if (!clear(x, z, rad, spacing) || pathDist(x, z) < rad + 1.2) continue;
+    if (rad >= 0.5) claim(x, z, rad);
+    place(x, z);
   }
 
   // tall hiding grass spread evenly: each patch goes where cover is furthest away
@@ -360,10 +423,19 @@ export function buildGenerated(scene, world, seed) {
     patches.push(p);
     for (const q of cands) q.d = Math.min(q.d, Math.hypot(q.x - p.x, q.z - p.z));
   }
-  kit.grass(patches.map((p) => ({ ...p, count: Math.round(p.r * p.r * 55), hMin: 1.0, hMax: 1.6 })), 0x9a1414, true);
+  const hash = (x, z) => { const v = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453; return v - Math.floor(v); };
+  const thinned = (x, z) => { const zn = zoneAt(x, z); return hash(x, z) > zn.a.grass + (zn.b.grass - zn.a.grass) * zn.mix; };
+  // grass takes on the zone's colour too (it covers most of the ground)
+  const grassTint = (x, z, c) => {
+    const zn = zoneAt(x, z);
+    _tint.copy(zn.a.tint).lerp(zn.b.tint, zn.mix).multiplyScalar(0.3);
+    c.lerp(_tint, (zn.a.tintK + (zn.b.tintK - zn.a.tintK) * zn.mix) * 0.9);
+  };
+  kit.grass(patches.map((p) => ({ ...p, count: Math.round(p.r * p.r * 55), hMin: 1.0, hMax: 1.6, tint: grassTint })), 0x9a1414, true);
   kit.grass([{
     x: 0, z: 0, r: HALF + 3, square: true, count: 105000, hMin: 0.2, hMax: 0.6,
-    avoid: (x, z) => pathDist(x, z) < 1.6 || inPool(x, z, 0.6) || inBuilding(x, z),
+    avoid: (x, z) => pathDist(x, z) < 1.6 || inPool(x, z, 0.6) || inBuilding(x, z) || thinned(x, z),
+    tint: grassTint,
   }], 0x7a1010, false);
 
   const plants = [];
@@ -465,6 +537,8 @@ export function buildGenerated(scene, world, seed) {
     pathDist,
     timings: { ...timings, total: Math.round(performance.now() - t0) },
     terrain: { ridges: ridges.map((q) => q.pts), ravine: ravine && ravine.pts, slope },
+    zones: zones.map((zn) => ({ x: zn.x, z: zn.z, type: zn.type })),
+    zoneAt: (x, z) => zoneAt(x, z).type,
     layout: { spawn, towers, monster, pools, landmarks: landmarks.map((L) => L.type), paths: paths.length, grassPatches: patches.length, opened },
     stats: { chunks, colliders: world.colliders.length },
     setQuality: (q) => kit.setQuality(q),

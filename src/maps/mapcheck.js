@@ -71,6 +71,7 @@ export const GATES = {
   genMs: (m) => m.genMs <= 2000,
   steepProps: (m) => !(m.steepProps > 4),
   ravineHidden: (m) => m.ravineHidden !== false,
+  zoneTypes: (m) => !(m.zoneTypes < 4),
 };
 
 export function checkMap(world, level, genMs = 0) {
@@ -116,8 +117,9 @@ export function checkMap(world, level, genMs = 0) {
       for (let i = 1; i < pts.length - 1; i++) {
         const [x, z] = pts[i];
         if (Math.abs(x) > 55 || Math.abs(z) > 55 || (level.pathDist && level.pathDist(x, z) < 10)) continue;
-        const [px, pz] = pts[i + 1];
-        const len = Math.hypot(px - x, pz - z), nx = -(pz - z) / len, nz = (px - x) / len;
+        // across the channel: perpendicular to the bend's average direction (prev -> next)
+        const [px, pz] = pts[i + 1], [qx, qz] = pts[i - 1];
+        const len = Math.hypot(px - qx, pz - qz), nx = -(pz - qz) / len, nz = (px - qx) / len;
         for (const side of [1, -1]) {
           const ox = x + nx * 15 * side, oz = z + nz * 15 * side;
           if (Math.abs(ox) > 66 || Math.abs(oz) > 66) continue;
@@ -128,6 +130,13 @@ export function checkMap(world, level, genMs = 0) {
       m.ravineHide = tested ? Math.round((100 * hidden) / tested) : 100;
       m.ravineHidden = m.ravineHide >= 65; // natural banks: hidden from at least two thirds of directions
     }
+  }
+  // zones (stage 3): how many different biomes, and how much ground each covers
+  if (level.zones) {
+    m.zoneTypes = new Set(level.zones.map((z) => z.type)).size;
+    const area = {};
+    for (let x = -64; x <= 64; x += 4) for (let z = -64; z <= 64; z += 4) { const t = level.zoneAt(x, z); area[t] = (area[t] || 0) + 1; }
+    m.zoneArea = area;
   }
   // heightFn cost per call
   const t0 = performance.now();

@@ -1,8 +1,9 @@
 // Set pieces for generated maps, adapted from the matching areas of the classic
 // Red Field. Each landmark has a footprint (r), an optional flattened area and
 // path entry points; build(ctx, L) places its props.
-//   ctx = { kit, R, rnd, clear, claim, pathDist, reserved }
+//   ctx = { kit, R, rnd, clear, claim, pathDist, reserved, steep(x, z) }
 //   L   = { type, x, z, rot, axis, ... }
+// `zone` is the biome a landmark forces on the area around it (see generated.js).
 
 // rotate a local offset (lx, lz) by L.rot around the landmark centre
 const at = (L, lx, lz) => {
@@ -13,9 +14,9 @@ const at = (L, lx, lz) => {
 export const LANDMARKS = {
   // ruined chapel inside a fenced graveyard (axis aligned: the chapel's big door faces +z)
   graveyard: {
-    r: 25, flat: { y: 0.2, r1: 13, r2: 19 }, stoneYard: true,
+    r: 25, flat: { y: 0.2, r1: 13, r2: 19 }, stoneYard: true, zone: 'graves',
     entries: (L) => [[L.x, L.z + 17]],
-    build({ kit, R, rnd, clear, claim, pathDist, reserved }, L) {
+    build({ kit, R, rnd, clear, claim, pathDist, reserved, steep }, L) {
       const { x: cx, z: cz } = L;
       kit.chapel(cx, cz);
       reserved.push([cx, cz, 11]);
@@ -30,11 +31,11 @@ export const LANDMARKS = {
         }
       }
       const W = cx - 22, E = cx + 22, N = cz - 14, S = cz + 13;
-      kit.fence(W, N, E, N);
-      kit.fence(W, S, cx - 5, S);
-      kit.fence(cx + 5, S, E, S);
-      kit.fence(W, N, W, S);
-      kit.fence(E, N, E, S);
+      kit.fence(W, N, E, N, steep);
+      kit.fence(W, S, cx - 5, S, steep);
+      kit.fence(cx + 5, S, E, S, steep);
+      kit.fence(W, N, W, S, steep);
+      kit.fence(E, N, E, S, steep);
       for (let i = 0; i < 4; i++) {
         const x = cx + (rnd() < 0.5 ? -1 : 1) * R(11, 20), z = cz + R(-12, 10);
         if (clear(x, z, 0.6, 0.5)) { kit.deadTree(x, z, R(6, 9), rnd() < 0.6); claim(x, z, 0.6); }
@@ -44,7 +45,7 @@ export const LANDMARKS = {
 
   // "orchestra" clearing: rings of chairs facing a stage of pianos, drums and a gong
   orchestra: {
-    r: 17, flat: { y: 0, r1: 15, r2: 21 },
+    r: 17, flat: { y: 0, r1: 15, r2: 21 }, zone: 'junk',
     entries: (L) => [at(L, 0, 19)],
     build({ kit, R, rnd, claim }, L) {
       for (const [r0, n] of [[6, 14], [8, 18], [10, 22]]) {
@@ -80,7 +81,7 @@ export const LANDMARKS = {
 
   // a stand of dead trees with hanging dolls
   deadForest: {
-    r: 17, flat: null,
+    r: 17, flat: null, zone: 'deadwood',
     entries: () => [],
     build({ kit, R, rnd, clear, claim, pathDist }, L) {
       const disc = (n, r, spacing, place) => {
@@ -102,7 +103,7 @@ export const LANDMARKS = {
 
   // two rows of big boulders: mostly player-only gaps, every third gap fits the monster
   canyon: {
-    r: 21, flat: null,
+    r: 21, flat: null, zone: 'rocks',
     entries: (L) => (L.axis === 'x' ? [[L.x - 22, L.z], [L.x + 22, L.z]] : [[L.x, L.z - 22], [L.x, L.z + 22]]),
     build({ kit, R, rnd, claim }, L) {
       for (const off of [-5.5, 5.5]) {
@@ -121,9 +122,9 @@ export const LANDMARKS = {
 
   // junk heap: speaker stacks, upright pianos, bass drums behind a broken fence
   junkyard: {
-    r: 13, flat: null,
+    r: 13, flat: null, zone: 'junk',
     entries: () => [],
-    build({ kit, R, rnd, clear, claim }, L) {
+    build({ kit, R, rnd, clear, claim, steep }, L) {
       for (let i = 0; i < 7; i++) {
         const [x, z] = at(L, R(-11, 11), R(-11, 11));
         if (!clear(x, z, 1.2, 1.5)) continue;
@@ -139,7 +140,7 @@ export const LANDMARKS = {
       for (let i = 0; i < 8; i++) { const [x, z] = at(L, R(-12, 12), R(-12, 12)); kit.bassDrum(x, z, rnd() * 6); }
       // fences are axis aligned; put it on the side facing the map centre (not on the edge slope)
       const fz = Math.abs(L.z - 13) < Math.abs(L.z + 13) ? L.z - 13 : L.z + 13;
-      kit.fence(L.x - 13, fz, L.x + 13, fz);
+      kit.fence(L.x - 13, fz, L.x + 13, fz, steep);
     },
   },
 };
