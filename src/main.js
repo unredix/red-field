@@ -140,6 +140,8 @@ window.game = {
     }
     return rows;
   },
+  // dev: frame-time benchmark of the real loop with a scripted player (see runBench)
+  bench: (o) => runBench(o),
   // dev: headless monster tests (src/devtests.js)
   reachTest: async (o) => (await import('./devtests.js')).reachTest(o),
   rushSim: async (o) => (await import('./devtests.js')).rushSim(o),
@@ -308,7 +310,7 @@ function clearDeathFx() {
   canvas.style.transform = '';
   camera.fov = 76;
   camera.updateProjectionMatrix();
-  ui.chase.style.opacity = '0';
+  setStyle(ui.chase, 'opacity', '0');
 }
 
 // ---------------------------------------------------------------- intro (~12 s, skippable)
@@ -446,6 +448,11 @@ function showWin() {
 }
 
 // ---------------------------------------------------------------- UI
+// DOM writes only when the value changes: every write can cost the browser a
+// style / layout / paint pass, and most HUD values are the same frame to frame
+const setText = (el, v) => { if (el._text !== v) { el._text = v; el.textContent = v; } };
+const setStyle = (el, k, v) => { const c = el._style || (el._style = {}); if (c[k] !== v) { c[k] = v; el.style[k] = v; } };
+
 const ui = {
   overlay: document.getElementById('overlay'),
   death: document.getElementById('death'),
@@ -638,7 +645,7 @@ function updateJumpscare(realDt) {
     canvas.classList.add('distort');
     const j = T < 0.7 ? 4 : 14;
     canvas.style.transform = `translate(${(Math.random() - 0.5) * j}px, ${(Math.random() - 0.5) * j}px) skew(${(Math.random() - 0.5) * j * 0.15}deg) scale(${1.02 + Math.random() * 0.02})`;
-    ui.chase.style.opacity = String(0.6 + 0.35 * Math.sin(T * 30));
+    setStyle(ui.chase, 'opacity', (0.6 + 0.35 * Math.sin(T * 30)).toFixed(2));
   }
   if (T > 0.45 && !deathFx.sprayed) { deathFx.sprayed = true; gore.spray(4); } // spittle hitting the "lens"
 
@@ -658,7 +665,7 @@ function updateJumpscare(realDt) {
     ui.blackout.classList.add('on');
     canvas.classList.remove('distort');
     canvas.style.transform = '';
-    ui.chase.style.opacity = '0';
+    setStyle(ui.chase, 'opacity', '0');
     ui.red.style.opacity = '0';
     ui.red.style.background = '';
     gore.splatter();
@@ -755,8 +762,8 @@ function updateCompass(show) {
   for (const t of compass.ticks) {
     const rel = wrapPi(t.a - player.yaw);
     const vis = Math.abs(rel) < COMPASS_FOV / 2;
-    t.el.style.display = vis ? '' : 'none';
-    if (vis) t.el.style.left = `${half - (rel / (COMPASS_FOV / 2)) * half}px`;
+    setStyle(t.el, 'display', vis ? '' : 'none');
+    if (vis) setStyle(t.el, 'left', `${(half - (rel / (COMPASS_FOV / 2)) * half).toFixed(1)}px`);
   }
   towers.sites.forEach((s, i) => {
     const el = compass.marks[i];
@@ -764,8 +771,8 @@ function updateCompass(show) {
     const lim = COMPASS_FOV / 2 - 0.12;
     const edge = Math.abs(rel) > lim;
     const r = Math.max(-1, Math.min(1, rel / lim));
-    el.style.left = `${half - r * (half - 8)}px`;
-    el.textContent = edge ? (rel > 0 ? '◂✦' : '✦▸') : '✦';
+    setStyle(el, 'left', `${(half - r * (half - 8)).toFixed(1)}px`);
+    setText(el, edge ? (rel > 0 ? '◂✦' : '✦▸') : '✦');
     el.classList.toggle('awake', s.phase === 3);
     el.classList.toggle('edge', edge);
   });
@@ -791,19 +798,33 @@ function soundCue(p, loud, kind) {
   const c = cues[cueNext++ % cues.length];
   c.life = 0.8;
   c.peak = Math.min(1, loud * (1.15 - d / 35));
-  c.el.style.transform = `rotate(${(-rel * 180) / Math.PI}deg)`;
+  setStyle(c.el, 'transform', `rotate(${((-rel * 180) / Math.PI).toFixed(1)}deg)`);
 }
 function updateCues(dt) {
   for (const c of cues) {
     if (c.life <= 0) continue;
     c.life -= dt;
-    c.el.style.opacity = c.life > 0 ? String(c.peak * Math.min(1, c.life / 0.5)) : '0';
+    setStyle(c.el, 'opacity', c.life > 0 ? (c.peak * Math.min(1, c.life / 0.5)).toFixed(2) : '0');
   }
 }
+
+// dev profiler (game.bench): CPU time of each part of a step
+const prof = { on: false, t: 0, cur: null };
+const lap = (name) => {
+  if (!prof.on) return;
+  const t = performance.now();
+  prof.cur[name] = (prof.cur[name] || 0) + (t - prof.t);
+  prof.t = t;
+};
+let benchActive = false;
 
 function frame() {
   requestAnimationFrame(frame);
   const realDt = Math.min(clock.getDelta(), 1 / 20);
+  if (!benchActive) step(realDt);
+}
+
+function step(realDt) {
   slowmoT -= realDt;
   timeScale = slowmoT > 0 ? 0.3 : Math.min(1, timeScale + realDt * 3);
   let dt = realDt * timeScale;
@@ -823,6 +844,7 @@ function frame() {
     if (flashlight.on === player.hiding) { flashlight.toggle(); sfx.click(); }
     // scent trail; wading through blood washes it away
     world.updateScent(dt, player.pos, player.wading, player.hidden);
+    lap('player');
     if (input.actionPressed('debug')) { showDebug = !showDebug; ui.debug.style.display = showDebug ? 'block' : 'none'; }
     if (input.actionPressed('slash')) {
       const stone = towers?.aim(camera);
@@ -831,8 +853,11 @@ function frame() {
     }
     if (input.actionPressed('lure')) { if (arm.trigger('throw')) sfx.whoosh(); else clawDenied(); }
 
-    const lure = lures.filter((l) => l.active).at(-1) || null;
+    let lure = null;
+    for (let i = lures.length - 1; i >= 0 && !lure; i--) if (lures[i].active) lure = lures[i];
+    lap('input');
     monster?.update(dt, { player, flashlight, camera, lure, time: survival });
+    lap('monster');
   } else if (state === 'intro' || state === 'victory') {
     input.consumeMouse();
     cine.update(realDt);
@@ -846,10 +871,12 @@ function frame() {
   }
 
   for (const l of lures) l.update(dt, time);
+  lurePool.update();
   sparks.update(dt);
-  lures = lures.filter((l) => l.active || l.dying > 0);
+  if (lures.some((l) => !l.active && l.dying <= 0)) lures = lures.filter((l) => l.active || l.dying > 0);
 
   towers?.update(playing || state === 'victory' ? dt : 0, time, { player, camera });
+  lap('fx');
 
   flashlight.danger = danger;
   flashlight.update(dt, camera, time);
@@ -874,18 +901,21 @@ function frame() {
       },
     });
   }
+  lap('arm');
   level.update?.(dt, time, camera);
+  lap('level');
   sfx.setListener(camera);
   sfx.update(realDt, playing ? danger : 0);
+  lap('audio');
 
   // ---- HUD
-  ui.staminaFill.style.width = `${(player.stamina * 100).toFixed(1)}%`;
+  setStyle(ui.staminaFill, 'width', `${(player.stamina * 100).toFixed(1)}%`);
   ui.stamina.classList.toggle('exhausted', player.exhausted);
   staminaFullT = player.stamina >= 1 ? staminaFullT + dt : 0;
-  ui.stamina.style.opacity = staminaFullT > 1.2 ? '0' : '1';
-  ui.timer.textContent = fmt(survival);
+  setStyle(ui.stamina, 'opacity', staminaFullT > 1.2 ? '0' : '1');
+  setText(ui.timer, fmt(survival));
   if (towers) {
-    ui.towers.textContent = `✦ ${towers.count}/${towers.total}`;
+    setText(ui.towers, `✦ ${towers.count}/${towers.total}`);
     const th = playing ? towers.hud(player) : null;
     ui.charge.classList.toggle('show', !!th);
     towers.aimed = th?.mode === 'melody' ? towers.aim(camera) : null;
@@ -912,10 +942,10 @@ function frame() {
   updateCues(realDt);
   if (monster) {
     const aw = monster.awareness;
-    ui.eye.style.opacity = String(aw < 0.08 ? 0 : 0.15 + aw * 0.85);
+    setStyle(ui.eye, 'opacity', aw < 0.08 ? '0' : (0.15 + aw * 0.85).toFixed(2));
     ui.eye.classList.toggle('hunting', monster.state === 'CHASE' || monster.state === 'ATTACK');
     const hunting = playing && (monster.state === 'CHASE' || monster.state === 'ATTACK');
-    if (state !== 'dying') ui.chase.style.opacity = hunting ? String(0.35 + 0.25 * Math.sin(time * 8)) : '0';
+    if (state !== 'dying') setStyle(ui.chase, 'opacity', hunting ? (0.35 + 0.25 * Math.sin(time * 8)).toFixed(2) : '0');
   }
   if (flashWhiteT > 0) { // first frames of a parry
     flashWhiteT -= realDt;
@@ -928,7 +958,7 @@ function frame() {
     if (flashRed === 0) { ui.red.style.opacity = '0'; ui.red.style.background = ''; }
   }
 
-  ui.grain.style.backgroundPosition = `${(Math.random() * 128) | 0}px ${(Math.random() * 128) | 0}px`;
+  ui.grain.style.transform = `translate(${-((Math.random() * 128) | 0)}px, ${-((Math.random() * 128) | 0)}px)`;
 
   fpsAcc += realDt; fpsFrames++;
   if (fpsAcc > 0.5) {
@@ -954,16 +984,133 @@ function frame() {
     camera.lookAt(v.x, 0, v.z);
     camera.fov = 60; camera.updateProjectionMatrix();
   }
+  lap('hud');
   renderer.clear();
   renderer.render(scene, camera);
+  lap('render');
   if (!debugTop && !cinematic && state !== 'dying' && state !== 'dead' && state !== 'won') {
     renderer.clearDepth();
     renderer.render(arm.scene, arm.camera);
   }
+  lap('renderArm');
+}
+
+// ---------------------------------------------------------------- dev: frame-time benchmark
+// game.bench({ secs }) plays the real game loop with a scripted player: it runs a
+// loop around the towers (sprinting, looking around, hiding, slashing, throwing
+// lures), gets chased, wakes a tower. Fixed 60 Hz steps, each timed wall-clock
+// (CPU + GPU: it waits for the frame to finish), split into parts. Returns
+// average / 1% low / worst frames and what was going on in them.
+async function runBench({ secs = 60, sync = true, log = null, yieldEvery = 1 } = {}) {
+  const dt = 1 / 60;
+  const yieldNow = () => new Promise((res) => { const ch = new MessageChannel(); ch.port1.onmessage = () => res(); ch.port2.postMessage(0); });
+  const gl = renderer.getContext(), px = new Uint8Array(4);
+  restart();
+  benchActive = true; prof.on = true;
+  state = 'playing'; input.locked = true;
+  ui.overlay.classList.add('hidden');
+  let bites = 0;
+  const onKill = monster?.onKill;
+  if (monster) monster.onKill = () => { bites++; };
+  // count path planning / sight checks per frame
+  const counters = { path: 0, pathMs: 0, los: 0 };
+  const fp = world.findPath, los = world.lineOfSight;
+  world.findPath = function (...a) { const t0 = performance.now(); const r = fp.apply(this, a); counters.path++; counters.pathMs += performance.now() - t0; return r; };
+  world.lineOfSight = function (...a) { counters.los++; return los.apply(this, a); };
+  // time the monster's parts (nested calls count in both)
+  const mt = {}, wrapped = [];
+  const wrap = (obj, names) => {
+    for (const k of names) {
+      const orig = obj[k];
+      if (typeof orig !== 'function') continue;
+      obj[k] = function (...a) { const t0 = performance.now(); const r = orig.apply(this, a); mt[k] = (mt[k] || 0) + performance.now() - t0; return r; };
+      wrapped.push([obj, k, orig]);
+    }
+  };
+  if (monster) wrap(monster, ['_perceive', '_plan', '_followGoal', '_move', '_watchdog', '_animate', '_updateAttack', '_updateRush', '_updateBoxes']);
+  wrap(world, ['nearestVisible', 'nearestWalkable']);
+  const mem = performance.memory;
+  const wps = [...(towers ? towers.sites.map((s) => ({ x: s.x, z: s.z })) : []), { x: 0, z: 0 }, { x: -40, z: 40 }, { x: 40, z: -40 }];
+  let wp = 0, hideT = 0;
+  const frames = [];
+  const refs = [];
+  const B = input.binds;
+  for (let i = 0, t = 0; t < secs; i++, t += dt) {
+    // --- scripted player
+    const target = wps[wp % wps.length];
+    if (Math.hypot(target.x - player.pos.x, target.z - player.pos.z) < 7) wp++;
+    player.yaw = Math.atan2(-(target.x - player.pos.x), -(target.z - player.pos.z)) + Math.sin(t * 0.8) * 0.7;
+    player.pitch = Math.sin(t * 0.37) * 0.15;
+    input.keys.clear();
+    if (hideT > 0) { hideT -= dt; input.keys.add(B.hide); } else {
+      input.keys.add(B.forward);
+      if (player.stamina > 0.4 && !player.exhausted) input.keys.add(B.sprint);
+    }
+    const every = (period, at) => Math.floor((t - at) / period) !== Math.floor((t - dt - at) / period) && t > at;
+    if (every(14, 6)) hideT = 1.5;
+    if (every(9, 4)) { input.pressed.add(B.slash); input.keys.add(B.slash); }
+    if (every(13, 8)) { input.pressed.add(B.lure); input.keys.add(B.lure); }
+    if (every(6, 3)) input.pressed.add(B.jump);
+    if (monster && every(1000, 8)) monster.alert(player.pos, 1);
+    if (towers && every(1000, 30)) towers._activate(towers.sites[0]);
+    // --- the frame
+    counters.path = 0; counters.pathMs = 0; counters.los = 0;
+    for (const k in mt) mt[k] = 0;
+    const progs = renderer.info.programs.length;
+    const heap0 = mem ? mem.usedJSHeapSize : 0;
+    // GC detector: a weakly held object from an earlier frame vanished
+    let gcSeen = false;
+    for (let k = refs.length - 1; k >= 0; k--) if (!refs[k].deref()) { gcSeen = true; refs.splice(k, 1); }
+    if (refs.length < 4) refs.push(new WeakRef({ i }));
+    if (gcSeen && frames.length) frames[frames.length - 1].gcAfter = true;
+    prof.cur = {};
+    const t0 = performance.now();
+    prof.t = t0;
+    step(dt);
+    if (sync) { gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); lap('gpu'); }
+    const f = { t: +t.toFixed(2), ms: performance.now() - t0, ...prof.cur, path: counters.path, pathMs: counters.pathMs, los: counters.los,
+      calls: renderer.info.render.calls, heap: mem ? mem.usedJSHeapSize : 0, gc: mem && mem.usedJSHeapSize < heap0 - 2e5,
+      newProgs: renderer.info.programs.length - progs,
+      mparts: Object.entries(mt).filter(([, v]) => v > 0.5).map(([k, v]) => `${k}=${v.toFixed(1)}`).join(' '),
+      mon: monster ? monster.state + (monster.rush ? '/' + monster.rush.phase : '') + (monster.squeezing ? '/sq' : '') : '' };
+    frames.push(f);
+    if (i % yieldEvery === 0) { await yieldNow(); if (i % 60 === 0) log?.(i); }
+  }
+  world.findPath = fp; world.lineOfSight = los;
+  for (const [obj, k, orig] of wrapped) obj[k] = orig;
+  if (monster) monster.onKill = onKill;
+  prof.on = false; benchActive = false;
+  input.locked = false; input.keys.clear();
+  state = 'playing'; menu.setMode('pause'); ui.overlay.classList.remove('hidden');
+  // --- summary
+  const ms = frames.map((f) => f.ms).sort((a, b) => a - b);
+  const pct = (q) => ms[Math.min(ms.length - 1, Math.floor(q * ms.length))];
+  const worst1 = ms.slice(Math.floor(ms.length * 0.99));
+  const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+  const parts = ['player', 'input', 'monster', 'fx', 'arm', 'level', 'audio', 'hud', 'render', 'renderArm', 'gpu'];
+  const partStats = {};
+  for (const k of parts) { const v = frames.map((f) => f[k] || 0); partStats[k] = { avg: +mean(v).toFixed(2), max: +Math.max(...v).toFixed(1) }; }
+  const top = [...frames].sort((a, b) => b.ms - a.ms).slice(0, 15).map((f) => {
+    const big = parts.filter((k) => (f[k] || 0) > 1.5).map((k) => `${k}=${f[k].toFixed(1)}`).join(' ');
+    return `t=${f.t} ${f.ms.toFixed(1)}ms [${big}] path=${f.path}(${f.pathMs.toFixed(1)}ms) los=${f.los} calls=${f.calls}${f.gc ? ' GC' : ''} ${f.mon}`;
+  });
+  return {
+    frames: frames.length, bites,
+    avgMs: +mean(ms).toFixed(2), p50: +pct(0.5).toFixed(2), p99: +pct(0.99).toFixed(2), max: +ms[ms.length - 1].toFixed(1),
+    avgFps: Math.round(1000 / mean(ms)), low1Fps: Math.round(1000 / mean(worst1)),
+    over33: frames.filter((f) => f.ms > 33).length, gcFrames: frames.filter((f) => f.gc).length,
+    parts: partStats, top, raw: frames,
+  };
 }
 
 player._updateCamera(0, 0, 0);
 // compile every shader now (behind the start screen) instead of on first use
 renderer.compile(scene, camera);
 renderer.compile(arm.scene, arm.camera);
+// ...and warm up the path planner the same way: its first few runs are slow
+// (not yet optimised by the JS engine) and would hitch the first chase
+if (world.nav) {
+  const n = world.nav, pick = (k) => world.nearestWalkable(n.minX + ((k * 37) % n.cols) * n.cell, n.minZ + ((k * 61) % n.rows) * n.cell);
+  for (let k = 0; k < 24; k++) world.findPath(pick(k), pick(k + 7), k % 4 === 3 && world.navSqueeze ? world.navSqueeze : n);
+}
 frame();

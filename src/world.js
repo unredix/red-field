@@ -125,7 +125,7 @@ export class World {
   update(dt) {
     this.time += dt;
     // noises live one frame for listeners; keep a short tail for debugging
-    this.noises = this.noises.filter((n) => this.time - n.t < 0.1);
+    if (this.noises.length && this.time - this.noises[0].t >= 0.1) this.noises = this.noises.filter((n) => this.time - n.t < 0.1);
   }
 
   // True if nothing solid is between a and b.
@@ -313,63 +313,78 @@ export class World {
     const goal = this._cellOf(goalP.x, goalP.z, n);
     if (this._clearLine(from.x, from.z, goalP.x, goalP.z, n)) return [new THREE.Vector3(goalP.x, 0, goalP.z)];
 
-    const N = n.cols * n.rows;
-    const gScore = new Float32Array(N).fill(Infinity);
-    const came = new Int32Array(N).fill(-1);
-    const closed = new Uint8Array(N);
-    const open = []; // simple binary heap of [f, idx]
+    // A* with buffers kept per grid (no garbage per call: it runs several times a
+    // second and fresh arrays every time meant GC hitches) and a typed binary heap
+    const N = n.cols * n.rows, cols = n.cols, blocked = n.blocked;
+    const A = n.astar ||= { g: new Float32Array(N), came: new Int32Array(N), seen: new Uint32Array(N), closed: new Uint32Array(N), gen: 0, hf: new Float32Array(4096), hi: new Int32Array(4096) };
+    const gen = ++A.gen;
+    let hf = A.hf, hi = A.hi, size = 0;
     const push = (f, i) => {
-      open.push([f, i]);
-      let k = open.length - 1;
-      while (k > 0) { const p = (k - 1) >> 1; if (open[p][0] <= open[k][0]) break; [open[p], open[k]] = [open[k], open[p]]; k = p; }
+      if (size === hf.length) {
+        const nf = new Float32Array(size * 2); nf.set(hf); hf = A.hf = nf;
+        const ni = new Int32Array(size * 2); ni.set(hi); hi = A.hi = ni;
+      }
+      let k = size++;
+      while (k > 0) { const p = (k - 1) >> 1; if (hf[p] <= f) break; hf[k] = hf[p]; hi[k] = hi[p]; k = p; }
+      hf[k] = f; hi[k] = i;
     };
     const pop = () => {
-      const top = open[0], last = open.pop();
-      if (open.length) {
-        open[0] = last;
+      const top = hi[0];
+      if (--size > 0) {
+        const f = hf[size], i = hi[size];
         let k = 0;
         for (;;) {
-          const l = 2 * k + 1, r = l + 1; let m = k;
-          if (l < open.length && open[l][0] < open[m][0]) m = l;
-          if (r < open.length && open[r][0] < open[m][0]) m = r;
-          if (m === k) break;
-          [open[m], open[k]] = [open[k], open[m]]; k = m;
+          let c = 2 * k + 1;
+          if (c >= size) break;
+          if (c + 1 < size && hf[c + 1] < hf[c]) c++;
+          if (hf[c] >= f) break;
+          hf[k] = hf[c]; hi[k] = hi[c]; k = c;
         }
+        hf[k] = f; hi[k] = i;
       }
       return top;
     };
-    const si = start[1] * n.cols + start[0], gi = goal[1] * n.cols + goal[0];
-    const h = (c, r) => { const dx = Math.abs(c - goal[0]), dz = Math.abs(r - goal[1]); return Math.max(dx, dz) + 0.414 * Math.min(dx, dz); };
-    gScore[si] = 0;
+    const si = start[1] * cols + start[0], gi = goal[1] * cols + goal[0], gc = goal[0], gr = goal[1];
+    const h = (c, r) => { const dx = Math.abs(c - gc), dz = Math.abs(r - gr); return Math.max(dx, dz) + 0.414 * Math.min(dx, dz); };
+    A.seen[si] = gen; A.g[si] = 0; A.came[si] = -1;
     push(h(start[0], start[1]), si);
     let found = false, iter = 0;
-    while (open.length && iter++ < N * 2) {
-      const [, cur] = pop();
+    while (size && iter++ < N * 2) {
+      const cur = pop();
       if (cur === gi) { found = true; break; }
-      if (closed[cur]) continue;
-      closed[cur] = 1;
-      const cc = cur % n.cols, cr = (cur / n.cols) | 0;
+      if (A.closed[cur] === gen) continue;
+      A.closed[cur] = gen;
+      const cc = cur % cols, cr = (cur / cols) | 0, g0 = A.g[cur];
       for (let dz = -1; dz <= 1; dz++) {
         for (let dx = -1; dx <= 1; dx++) {
           if (!dx && !dz) continue;
           const nc = cc + dx, nr = cr + dz;
-          if (nc < 0 || nr < 0 || nc >= n.cols || nr >= n.rows) continue;
-          const ni = nr * n.cols + nc;
-          if (n.blocked[ni] || closed[ni]) continue;
-          if (dx && dz && (n.blocked[cr * n.cols + nc] || n.blocked[nr * n.cols + cc])) continue; // no corner cutting
-          const g = gScore[cur] + (dx && dz ? 1.414 : 1);
-          if (g < gScore[ni]) { gScore[ni] = g; came[ni] = cur; push(g + h(nc, nr), ni); }
+          if (nc < 0 || nr < 0 || nc >= cols || nr >= n.rows) continue;
+          const ni = nr * cols + nc;
+          if (blocked[ni] || A.closed[ni] === gen) continue;
+          if (dx && dz && (blocked[cr * cols + nc] || blocked[nr * cols + cc])) continue; // no corner cutting
+          const g = g0 + (dx && dz ? 1.414 : 1);
+          if (A.seen[ni] !== gen || g < A.g[ni]) { A.seen[ni] = gen; A.g[ni] = g; A.came[ni] = cur; push(g + h(nc, nr), ni); }
         }
       }
     }
     if (!found) return null;
 
+    // keep only the corners of the grid path, then string-pull: from each point
+    // go to the furthest corner after it that's in a straight walkable line
     const cells = [];
-    for (let i = gi; i !== -1; i = came[i]) cells.push(i);
+    for (let i = gi; i !== -1; i = A.came[i]) cells.push(i);
     cells.reverse();
-    const pts = cells.map((i) => new THREE.Vector3(n.minX + ((i % n.cols) + 0.5) * n.cell, 0, n.minZ + (((i / n.cols) | 0) + 0.5) * n.cell));
+    const pts = [];
+    for (let k = 0; k < cells.length; k++) {
+      const i = cells[k];
+      if (k > 0 && k < cells.length - 1) {
+        const a = cells[k - 1], b = cells[k + 1];
+        if (i - a === b - i) continue; // same step in and out: not a corner
+      }
+      pts.push(new THREE.Vector3(n.minX + ((i % cols) + 0.5) * n.cell, 0, n.minZ + (((i / cols) | 0) + 0.5) * n.cell));
+    }
     pts[pts.length - 1].set(goalP.x, 0, goalP.z);
-    // string-pulling smoothing
     const out = [];
     let ax = from.x, az = from.z, k = 0;
     while (k < pts.length) {

@@ -22,14 +22,20 @@ const C = ARM_CONFIG;
 const damp = (a, b, r, dt) => a + (b - a) * (1 - Math.exp(-r * dt));
 const smooth = (a, b, x) => { const t = Math.min(Math.max((x - a) / (b - a), 0), 1); return t * t * (3 - 2 * t); };
 
+const _veinOff = new THREE.Vector3(0, 0.05, -0.2);
 const glowMap = glowTexture('rgba(200,120,255,1)', 'rgba(120,40,255,0)');
 
 // ---------------------------------------------------------------- lure orb
-// Lure orbs borrow pre-built slots. Each slot's PointLight stays in the scene
-// for the whole game (intensity 0 when idle): adding or removing a light would
-// change the light count and force every material to recompile (a ~1.7 s freeze).
+// Lure orbs borrow pre-built slots. They share ONE PointLight that stays in the
+// scene for the whole game (intensity 0 when idle): adding or removing a light
+// would change the light count and force every material to recompile (a ~1.7 s
+// freeze), and every light costs every lit pixel (~0.4 ms a frame each), so the
+// newest orb gets the light and an older one keeps just its glow.
 export class LurePool {
   constructor(scene, size = C.maxCharges) {
+    this.light = new THREE.PointLight(0xa050ff, 0, 12, 1.6);
+    this.light.position.set(0, -50, 0);
+    scene.add(this.light);
     const coreGeo = new THREE.SphereGeometry(0.1, 12, 10);
     const coreMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 1.2, 3.5) });
     this.slots = [];
@@ -38,12 +44,11 @@ export class LurePool {
       const core = new THREE.Mesh(coreGeo, coreMat);
       const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowMap, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
       glow.scale.set(1.2, 1.2, 1);
-      const light = new THREE.PointLight(0xa050ff, 0, 12, 1.6);
-      group.add(core, glow, light);
+      group.add(core, glow);
       group.position.set(0, -50, 0);
       scene.add(group);
       core.visible = glow.visible = false;
-      this.slots.push({ group, core, glow, light, owner: null });
+      this.slots.push({ group, core, glow, lightK: 0, owner: null });
     }
   }
 
@@ -66,11 +71,19 @@ export class LurePool {
     if (!s) return;
     s.owner = null;
     s.core.visible = s.glow.visible = false;
-    s.light.intensity = 0;
+    s.lightK = 0;
     s.group.position.set(0, -50, 0);
   }
 
-  releaseAll() { for (const s of this.slots) this.release(s); }
+  releaseAll() { for (const s of this.slots) this.release(s); this.update(); }
+
+  // After the lures have moved: the shared light follows the newest orb.
+  update() {
+    let best = null;
+    for (const s of this.slots) if (s.owner && (!best || s.owner.born > best.owner.born)) best = s;
+    this.light.intensity = best ? best.lightK : 0;
+    if (best) this.light.position.copy(best.group.position);
+  }
 }
 
 let _born = 0;
@@ -87,7 +100,6 @@ export class Lure {
     this.slot = pool.acquire(this);
     this.group = this.slot.group;
     this.glow = this.slot.glow;
-    this.light = this.slot.light;
     this.group.position.copy(this.pos);
     this.onBounce = null;
   }
@@ -106,7 +118,7 @@ export class Lure {
       const k = Math.max(this.dying / 0.35, 0);
       this.glow.scale.setScalar(1.2 + (1 - k) * 4);
       this.glow.material.opacity = k;
-      this.light.intensity = 12 * k;
+      this.slot.lightK = 12 * k;
       if (this.dying <= 0) this.dispose();
       return;
     }
@@ -134,7 +146,7 @@ export class Lure {
     this.group.position.copy(this.pos);
     const fade = Math.min(this.life / 1.5, 1);
     const flick = 0.85 + Math.sin(time * 23) * 0.1 + Math.sin(time * 7.3) * 0.05;
-    this.light.intensity = 5 * fade * flick;
+    this.slot.lightK = 5 * fade * flick;
     this.glow.material.opacity = fade;
   }
 
@@ -353,7 +365,7 @@ export class Arm {
     this.clawMat.color.setRGB(0.5 + 0.5 * k, 0.3 + 0.2 * k, 0.9 + 0.7 * k);
     this.glowSprite.material.opacity = 0.15 + 0.45 * k;
     this.veinLight.intensity = 0.5 * k;
-    this.veinLight.position.copy(this.rig.position).add(new THREE.Vector3(0, 0.05, -0.2));
+    this.veinLight.position.copy(this.rig.position).add(_veinOff);
 
     this.flashLight.intensity = 2.2 * (ctx.flashlightK ?? 1);
   }

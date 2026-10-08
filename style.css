@@ -17,10 +17,13 @@ html, body {
   background: radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.55) 80%, rgba(0,0,0,0.9) 100%);
 }
 
+/* film grain: a 128 px noise tile, nudged by a random 0-127 px each frame with a
+   transform (its own GPU layer, so moving it doesn't repaint anything) */
 #grain {
-  position: fixed; inset: -50%; pointer-events: none;
+  position: fixed; top: 0; left: 0; right: -128px; bottom: -128px; pointer-events: none;
   opacity: 0.07;
   mix-blend-mode: screen;
+  will-change: transform;
 }
 
 #hud { position: fixed; inset: 0; pointer-events: none; }
