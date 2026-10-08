@@ -103,6 +103,7 @@ let deathT = 0;
 let slowmoT = 0;
 let timeScale = 1;
 let flashRed = 0;
+let debugTop = false, debugLight = null, debugFog = 0; // game.topView()
 let hitStopT = 0;   // impact frames: the world freezes (real seconds)
 let flashWhiteT = 0;
 const deathFrom = new THREE.Vector3();
@@ -126,6 +127,37 @@ window.game = {
   map: MAP,
   seed: SEED,
   goToMap: (map, seed) => goToMap(map, seed),
+  // dev: build seeds from..to off-screen and check them (see src/maps/mapcheck.js)
+  sweep: async (from = 1, to = 50) => {
+    const { checkMap } = await import('./maps/mapcheck.js');
+    const rows = [];
+    for (let s = from; s <= to; s++) {
+      const sc = new THREE.Scene(), w = new World(sc);
+      const t0 = performance.now();
+      const L = buildGenerated(sc, w, s);
+      rows.push({ ...checkMap(w, L, performance.now() - t0), landmarks: L.layout.landmarks.join('/'), opened: L.layout.opened });
+      sc.traverse((o) => { o.geometry?.dispose?.(); for (const m of [].concat(o.material || [])) { m.map?.dispose?.(); m.dispose?.(); } });
+    }
+    return rows;
+  },
+  // dev: overhead view of the whole map (temporary light, no fog) for layout screenshots
+  topView: (on = !debugTop) => {
+    debugTop = on;
+    if (on) {
+      debugLight ||= new THREE.HemisphereLight(0xffffff, 0x886666, 4);
+      scene.add(debugLight);
+      debugFog = scene.fog.density; scene.fog.density = 0.003;
+      camera.far = 400;
+      level.setQuality?.({ density: 1, farMul: 10, cullMul: 10, grassShadow: false });
+    } else {
+      scene.remove(debugLight);
+      if (debugFog) scene.fog.density = debugFog;
+      camera.far = MAP === 'test' ? 200 : 100;
+      applyQuality(settings.quality);
+    }
+    camera.updateProjectionMatrix();
+    return on;
+  },
   applyQuality: (q) => applyQuality(q),
   get hints() { return hints; },
 };
@@ -896,9 +928,14 @@ function frame() {
   }
 
   input.endFrame();
+  if (debugTop) {
+    camera.position.set(0, 165, 75);
+    camera.lookAt(0, 0, 4);
+    camera.fov = 60; camera.updateProjectionMatrix();
+  }
   renderer.clear();
   renderer.render(scene, camera);
-  if (!cinematic && state !== 'dying' && state !== 'dead' && state !== 'won') {
+  if (!debugTop && !cinematic && state !== 'dying' && state !== 'dead' && state !== 'won') {
     renderer.clearDepth();
     renderer.render(arm.scene, arm.camera);
   }

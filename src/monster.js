@@ -592,7 +592,9 @@ export class Monster {
     } else if (this.attackPhase === 'lunge') {
       this.speed = C.lungeSpeed;
       this.headWorld(_eye);
-      _pt.copy(player.pos); _pt.y += player.height * 0.5;
+      // nearest point on the player's body (feet..head) to the jaws
+      _pt.copy(player.pos);
+      _pt.y = Math.max(player.pos.y, Math.min(_eye.y, player.pos.y + player.height));
       const f = this.forward;
       _v.set(player.pos.x - this.pos.x, 0, player.pos.z - this.pos.z).normalize();
       const ang = Math.acos(Math.max(-1, Math.min(1, _v.dot(f))));

@@ -1,23 +1,32 @@
 import * as THREE from 'three';
 import { PropKit } from '../props.js';
 import { mulberry32 } from '../world.js';
-import { buildTerrain, buildBackdrop, buildEmbers, makePathDist, makePlacer, smooth } from './common.js';
+import { buildTerrain, buildBackdrop, buildEmbers, makePathDist, makePlacer, smooth, bakeField } from './common.js';
 import { LANDMARKS } from './landmarks.js';
+import { deepPockets } from './mapcheck.js';
 
 // Seeded random Red Field. Same size, sky, fog and prop budget as the classic map:
-//   1. layout: spawn on an edge, 3 towers spread apart, monster far away,
-//      1-2 blood pools, 3 random landmarks
+//   1. layout: spawn on an edge, 3 towers >= 60 m apart, 2 blood pools covering
+//      the towers, 3 random landmarks
 //   2. mud paths: minimum spanning tree between all of them, with wobbly midpoints
-//   3. terrain: classic-style rolling hills with seeded phases, flattened under set pieces
-//   4. props: landmarks, then the same scatter counts as the classic map
+//   3. terrain: rolling hills with seeded phases, flattened under set pieces,
+//      baked into a heightfield (cheap lookups at runtime)
+//   4. props: landmarks, filler up to a fixed density budget, tall grass spread
+//      evenly (farthest-point), then pockets the monster can't reach are opened up
+//   5. the monster spawns far away, out of sight of the player
 // The same seed always builds the same map.
 
 const HALF = 70;
 const PATH_C = new THREE.Color(0.55, 0.36, 0.3);
 const BLOOD_C = new THREE.Color(0.55, 0.12, 0.1);
 const STONE_C = new THREE.Color(0.5, 0.36, 0.34);
+const DENSITY = 335;       // collider budget before the towers (classic map: ~426 in total)
+const GRASS_PATCHES = 27;  // tall hiding grass
 
 export function buildGenerated(scene, world, seed) {
+  const timings = {}, t0 = performance.now();
+  let tLast = t0;
+  const mark = (name) => { const t = performance.now(); timings[name] = Math.round(t - tLast); tLast = t; };
   const rnd = mulberry32((seed * 2654435761) >>> 0); // layout stream (props use kit.rnd)
   const R = (a, b) => a + rnd() * (b - a);
   const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
@@ -28,9 +37,9 @@ export function buildGenerated(scene, world, seed) {
   const spawn = [{ x: t, z: 58 }, { x: t, z: -58 }, { x: 58, z: t }, { x: -58, z: t }][side];
   spawn.yaw = Math.atan2(spawn.x, spawn.z); // face the centre (player yaw: forward = -sin, -cos)
 
-  // towers: best of 40 candidate sets (largest minimum spacing)
+  // towers: at least 60 m apart, 45 m from the spawn (best spread of up to 200 tries)
   let towers = null, bestScore = -1;
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 200; i++) {
     const set = [0, 1, 2].map(() => ({ x: R(-58, 58), z: R(-58, 58) }));
     if (set.some((p) => dist(p, spawn) < 45)) continue;
     const score = Math.min(dist(set[0], set[1]), dist(set[1], set[2]), dist(set[0], set[2]));
@@ -38,33 +47,32 @@ export function buildGenerated(scene, world, seed) {
     if (score >= 75) break;
   }
 
-  // monster: far from the player, not camping a tower
-  let monster = { x: -spawn.x, z: -spawn.z };
-  for (let i = 0; i < 60; i++) {
-    const p = { x: R(-55, 55), z: R(-55, 55) };
-    if (dist(p, spawn) >= 60 && towers.every((tw) => dist(tw, p) > 18)) { monster = p; break; }
-  }
-
-  const occupied = [[spawn, 8], [monster, 5], ...towers.map((tw) => [tw, 13])];
+  const occupied = [[spawn, 8], ...towers.map((tw) => [tw, 13])];
   const free = (p, r) => occupied.every(([o, orr]) => dist(o, p) > orr + r);
   const claimArea = (p, r) => occupied.push([p, r]);
 
-  // blood pools: one near the middle, maybe a second one anywhere
+  // blood pools: two (a smaller third if needed), placed so every tower has one within ~55 m
   const pools = [];
-  for (let n = 0; n < (rnd() < 0.6 ? 2 : 1); n++) {
-    for (let i = 0; i < 80; i++) {
-      const p = n === 0 ? { x: R(-30, 30), z: R(-30, 30) } : { x: R(-58, 58), z: R(-58, 58) };
+  const poolReach = (ps) => Math.max(...towers.map((tw) => Math.min(...ps.map((p) => dist(p, tw)))));
+  for (let n = 0; n < 4; n++) {
+    if (n >= 2 && poolReach(pools) <= 55) break; // extra (smaller) pools only when two can't cover the towers
+    let best = null;
+    for (let i = 0; i < 160; i++) {
+      // half the candidates anywhere, half in a ring just outside a tower's clearing
+      const tw = towers[i % 3], a = R(0, Math.PI * 2), rr = R(23, 42);
+      const p = i % 2 ? { x: tw.x + Math.cos(a) * rr, z: tw.z + Math.sin(a) * rr } : { x: R(-56, 56), z: R(-56, 56) };
       if (!inside(p, 12) || !free(p, 9)) continue;
-      p.w = R(8, 10); p.d = R(5, 6.5);
-      pools.push(p); claimArea(p, 9);
-      break;
+      const score = poolReach([...pools, p]);
+      if (!best || score < best.score) best = { p, score };
     }
+    if (!best) continue;
+    best.p.w = n < 2 ? R(8, 10) : R(6, 7.5); best.p.d = n < 2 ? R(5, 6.5) : R(4, 5);
+    pools.push(best.p); claimArea(best.p, 9);
   }
 
-  // landmarks: 3 of the 5 kinds
+  // landmarks: 3 of the 5 kinds (if one doesn't fit, the next kind gets a go)
   const kinds = Object.keys(LANDMARKS);
   for (let i = kinds.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [kinds[i], kinds[j]] = [kinds[j], kinds[i]]; }
-  // (if one doesn't fit, the next kind in the shuffled list gets a go)
   const landmarks = [];
   for (const type of kinds) {
     if (landmarks.length === 3) break;
@@ -108,8 +116,10 @@ export function buildGenerated(scene, world, seed) {
     pts.push([B.x, B.z]);
     paths.push(pts);
   }
-  const pathDist = makePathDist(paths);
+  // exact polyline distance is costly and asked ~300k times while building: bake it (1 m grid)
+  const pathDist = bakeField(makePathDist(paths), HALF + 46, 1);
 
+  mark('layout');
   // ------------------------------------------------------------------ 3. terrain
   const ph = Array.from({ length: 7 }, () => R(0, Math.PI * 2));
   const fq = Array.from({ length: 4 }, () => R(0.85, 1.15));
@@ -120,7 +130,7 @@ export function buildGenerated(scene, world, seed) {
     { x: spawn.x, z: spawn.z, y: 0.2, r1: 4, r2: 9 },
     ...landmarks.filter((L) => LANDMARKS[L.type].flat).map((L) => ({ x: L.x, z: L.z, ...LANDMARKS[L.type].flat })),
   ];
-  const heightFn = (x, z) => {
+  const rawHeight = (x, z) => {
     let h = hill * (1.3 * Math.sin(x * 0.03 * fq[0] + ph[0]) * Math.cos(z * 0.027 * fq[1] + ph[1])
       + 0.9 * Math.sin(x * 0.09 * fq[2] + ph[2]) * Math.cos(z * 0.075 * fq[3] + ph[3]))
       + 0.5 * Math.sin(x * 0.19 + z * 0.13 + ph[4])
@@ -135,6 +145,8 @@ export function buildGenerated(scene, world, seed) {
     }
     return h;
   };
+  const heightFn = bakeField(rawHeight, HALF + 46, 0.5);
+  mark('bake');
   const yards = landmarks.filter((L) => LANDMARKS[L.type].stoneYard);
   const groundColor = (x, z, c) => {
     const n = 0.5 + 0.5 * Math.sin(x * 0.7 + Math.sin(z * 0.5) * 2) * Math.cos(z * 0.6);
@@ -151,17 +163,17 @@ export function buildGenerated(scene, world, seed) {
   buildTerrain(scene, HALF, heightFn, groundColor);
   const { backdrop, skyMat } = buildBackdrop(scene);
   const embers = buildEmbers(scene);
+  mark('terrain');
 
   // ------------------------------------------------------------------ 4. props
   const kit = new PropKit(scene, world, seed);
   const krnd = kit.rnd;
   const reserved = [
-    [spawn.x, spawn.z, 6], [monster.x, monster.z, 6],
+    [spawn.x, spawn.z, 6],
     ...towers.map((tw) => [tw.x, tw.z, 11]),
     ...pools.map((p) => [p.x, p.z, Math.max(p.w, p.d) / 2 + 2]),
   ];
-  const place = makePlacer({ rnd: krnd, half: HALF, reserved, pathDist });
-  const { R: KR, clear, claim, scatter } = place;
+  const { R: KR, clear, claim, scatter, solids } = makePlacer({ rnd: krnd, half: HALF, reserved, pathDist });
 
   // invisible walls + the rock ring just outside them
   world.addCollider(-HALF - 1, -10, -HALF - 1, HALF + 1, 30, -HALF);
@@ -195,7 +207,7 @@ export function buildGenerated(scene, world, seed) {
     }
   });
 
-  // landmarks, then keep the general scatter out of them
+  // landmarks, then keep the filler out of them
   const ctx = { kit, R: KR, rnd: krnd, clear, claim, pathDist, reserved };
   for (const L of landmarks) {
     L.r = LANDMARKS[L.type].r;
@@ -203,35 +215,49 @@ export function buildGenerated(scene, world, seed) {
   }
   for (const L of landmarks) reserved.push([L.x, L.z, L.r]);
 
-  // the same scatter counts as the classic map (keeps performance comparable)
+  // filler in the classic proportions until the density budget is reached
+  // (so maps with sparse landmarks don't end up emptier)
   const A = [-66, 66, -66, 66];
-  scatter(64, A, 0.8, 3, (x, z) => kit.cross(x, z, KR(2.6, 4.4), krnd() * 6, (krnd() - 0.5) * 0.3, krnd() < 0.8));
-  scatter(52, A, 2.4, 3, (x, z) => kit.boulder(x, z, KR(1.4, 2.8), KR(1.2, 2.8), KR(1.4, 2.8), krnd() * 6));
-  scatter(34, A, 0.6, 3, (x, z) => kit.deadTree(x, z, KR(5, 8), krnd() < 0.4));
   const types = ['guitar', 'guitar', 'violin', 'cello'];
-  for (let i = 0; i < 45; i++) {
-    const x = KR(-66, 66), z = KR(-66, 66);
-    if (!clear(x, z, 0.4, 0)) continue;
-    const ty = types[Math.floor(krnd() * types.length)];
-    kit.instrument(ty, x, z, krnd() * 6, ty === 'cello' ? krnd() < 0.7 : krnd() < 0.25);
-  }
-  for (let i = 0; i < 10; i++) {
+  for (let round = 0; round < 60 && world.colliders.length < DENSITY; round++) {
+    scatter(3, A, 0.8, 3, (x, z) => kit.cross(x, z, KR(2.6, 4.4), krnd() * 6, (krnd() - 0.5) * 0.3, krnd() < 0.8));
+    scatter(3, A, 2.4, 3, (x, z) => kit.boulder(x, z, KR(1.4, 2.8), KR(1.2, 2.8), KR(1.4, 2.8), krnd() * 6));
+    scatter(1, A, 0.6, 3, (x, z) => kit.deadTree(x, z, KR(5, 8), krnd() < 0.4));
+    for (let i = 0; i < 4; i++) {
+      const x = KR(-66, 66), z = KR(-66, 66);
+      if (!clear(x, z, 0.4, 0)) continue;
+      const ty = types[Math.floor(krnd() * types.length)];
+      kit.instrument(ty, x, z, krnd() * 6, ty === 'cello' ? krnd() < 0.7 : krnd() < 0.25);
+    }
     const x = KR(-64, 64), z = KR(-64, 64);
     if (clear(x, z, 0.5, 0)) kit.bassDrum(x, z, krnd() * 6);
   }
 
-  // tall hiding grass patches, off the paths and out of buildings
-  const patches = [];
-  for (let i = 0; i < 400 && patches.length < 21; i++) {
-    const p = { x: KR(-64, 64), z: KR(-64, 64), r: KR(3.2, 4.5) };
-    if (pathDist(p.x, p.z) < p.r + 1 || !clear(p.x, p.z, p.r * 0.5, 0)) continue;
-    if (patches.some((q) => Math.hypot(q.x - p.x, q.z - p.z) < q.r + p.r + 4)) continue;
-    patches.push(p);
-  }
-  kit.grass(patches.map((p) => ({ ...p, count: Math.round(p.r * p.r * 55), hMin: 1.0, hMax: 1.6 })), 0x9a1414, true);
+  // tall hiding grass spread evenly: each patch goes where cover is furthest away
   const inPool = (x, z, m) => pools.some((p) => Math.abs(x - p.x) < p.w / 2 + m && Math.abs(z - p.z) < p.d / 2 + m);
   const inBuilding = (x, z) => yards.some((y) => Math.abs(x - y.x) < 6.5 && Math.abs(z - y.z) < 10.5)
     || pools.some((p) => p.shed && Math.abs(x - p.shed.x) < 4 && Math.abs(z - p.shed.z) < 3.3);
+  const nearSolid = (x, z, r) => solids.some(([sx, sz, sr]) => (x - sx) ** 2 + (z - sz) ** 2 < (sr + r) ** 2);
+  const cands = [];
+  for (let x = -62; x <= 62; x += 4) {
+    for (let z = -62; z <= 62; z += 4) {
+      const cx = x + KR(-1.5, 1.5), cz = z + KR(-1.5, 1.5);
+      if (pathDist(cx, cz) < 3.6 || inPool(cx, cz, 2) || inBuilding(cx, cz) || nearSolid(cx, cz, 1.2)) continue;
+      if (Math.hypot(cx - spawn.x, cz - spawn.z) < 7 || towers.some((tw) => Math.hypot(cx - tw.x, cz - tw.z) < 11)) continue;
+      cands.push({ x: cx, z: cz, d: Infinity });
+    }
+  }
+  const patches = [];
+  while (patches.length < GRASS_PATCHES && cands.length) {
+    let pick = 0;
+    if (!patches.length) pick = Math.floor(krnd() * cands.length);
+    else for (let i = 1; i < cands.length; i++) if (cands[i].d > cands[pick].d) pick = i;
+    const c = cands.splice(pick, 1)[0];
+    const p = { x: c.x, z: c.z, r: Math.max(2.6, Math.min(KR(3.2, 4.5), pathDist(c.x, c.z) - 1)) };
+    patches.push(p);
+    for (const q of cands) q.d = Math.min(q.d, Math.hypot(q.x - p.x, q.z - p.z));
+  }
+  kit.grass(patches.map((p) => ({ ...p, count: Math.round(p.r * p.r * 55), hMin: 1.0, hMax: 1.6 })), 0x9a1414, true);
   kit.grass([{
     x: 0, z: 0, r: HALF + 3, square: true, count: 105000, hMin: 0.2, hMax: 0.6,
     avoid: (x, z) => pathDist(x, z) < 1.6 || inPool(x, z, 0.6) || inBuilding(x, z),
@@ -253,15 +279,49 @@ export function buildGenerated(scene, world, seed) {
   kit.plants(plants);
 
   const towerSites = towers.map((tw) => kit.tower(tw.x, tw.z));
+  mark('props');
+
+  // ------------------------------------------------------------------ navigation + fairness
+  // open up pockets the monster can't reach (a player could hide there forever):
+  // remove the nearest boulder (or speaker stack) around each pocket until none are left
+  const buildNav = () => { world.markSmall(1.8, 1.0); world.buildNav(-HALF, -HALF, HALF, HALF, 1, 1.6, 0.9, 3.6); };
+  buildNav();
+  let opened = 0;
+  for (let pass = 0; pass < 8; pass++) {
+    const pockets = deepPockets(world);
+    if (!pockets.length) break;
+    for (const pk of pockets) {
+      let best = null, bestD = Infinity;
+      for (const b of world.colliders) {
+        const boulder = kit.boulderCols.has(b);
+        if (b.small || (!boulder && (b.max.y - b.min.y > 6 || b.max.x - b.min.x > 6 || b.max.z - b.min.z > 6))) continue; // not walls
+        const cx = Math.max(b.min.x, Math.min(pk.x, b.max.x)), cz = Math.max(b.min.z, Math.min(pk.z, b.max.z));
+        const d = Math.hypot(cx - pk.x, cz - pk.z) - (kit.boulderCols.has(b) ? 1 : 0); // prefer boulders
+        if (d < bestD) { bestD = d; best = b; }
+      }
+      if (best) { kit.removeCollider(best); opened++; }
+    }
+    buildNav();
+  }
+  mark('nav');
   const chunks = kit.bake();
-  world.markSmall(1.8, 1.0);
-  world.buildNav(-HALF, -HALF, HALF, HALF, 1, 1.6, 0.9, 3.6);
+  mark('merge');
+
+  // the monster starts far away, walkable, and out of the player's sight
+  const eye = (p, h) => new THREE.Vector3(p.x, heightFn(p.x, p.z) + h, p.z);
+  let monster = null;
+  for (let i = 0; i < 120 && !monster; i++) {
+    const p = { x: R(-56, 56), z: R(-56, 56) };
+    if (dist(p, spawn) < 60 || towers.some((tw) => dist(tw, p) < 18) || !world.walkable(p.x, p.z)) continue;
+    if (i < 100 && world.lineOfSight(eye(p, 2.5), eye(spawn, 1.6))) continue;
+    monster = p;
+  }
+  monster ||= { x: -spawn.x * 0.9, z: -spawn.z * 0.9 };
 
   // ------------------------------------------------------------------ validation
   // the monster must be able to reach every tower circle and the player's spawn
   const reach = (to) => {
-    const goal = new THREE.Vector3(to.x, 0, to.z);
-    const path = world.findPath(new THREE.Vector3(monster.x, 0, monster.z), goal);
+    const path = world.findPath(new THREE.Vector3(monster.x, 0, monster.z), new THREE.Vector3(to.x, 0, to.z));
     return !!path && path.length > 0 && Math.hypot(path.at(-1).x - to.x, path.at(-1).z - to.z) < 6;
   };
   const targets = [spawn, ...towers.map((tw) => {
@@ -299,7 +359,9 @@ export function buildGenerated(scene, world, seed) {
     seed,
     valid,
     intro,
-    layout: { spawn, towers, monster, pools, landmarks: landmarks.map((L) => L.type), paths: paths.length },
+    pathDist,
+    timings: { ...timings, total: Math.round(performance.now() - t0) },
+    layout: { spawn, towers, monster, pools, landmarks: landmarks.map((L) => L.type), paths: paths.length, grassPatches: patches.length, opened },
     stats: { chunks, colliders: world.colliders.length },
     setQuality: (q) => kit.setQuality(q),
     update(dt, time, camera) {

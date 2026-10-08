@@ -32,6 +32,24 @@ export function buildTerrain(scene, half, heightFn, colorFn) {
   scene.add(mesh);
 }
 
+// Sample a field (height, distance...) once into a grid (bilinear lookups
+// afterwards), so a rich generated terrain costs the same at runtime as a simple one.
+export function bakeField(fn, extent, cell = 0.5) {
+  const n = Math.ceil((extent * 2) / cell) + 1;
+  const h = new Float32Array(n * n);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) h[j * n + i] = fn(-extent + i * cell, -extent + j * cell);
+  const inv = 1 / cell, max = n - 1.001;
+  return (x, z) => {
+    let fx = (x + extent) * inv, fz = (z + extent) * inv;
+    fx = fx < 0 ? 0 : fx > max ? max : fx;
+    fz = fz < 0 ? 0 : fz > max ? max : fz;
+    const i = fx | 0, j = fz | 0, u = fx - i, v = fz - j, k = j * n + i;
+    return (h[k] * (1 - u) + h[k + 1] * u) * (1 - v) + (h[k + n] * (1 - u) + h[k + n + 1] * u) * v;
+  };
+}
+
+export const bakeHeight = bakeField;
+
 // Distance to the nearest of a set of polylines ([[x, z], ...]).
 export function makePathDist(paths) {
   return (x, z) => {

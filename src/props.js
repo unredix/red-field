@@ -75,6 +75,8 @@ export class PropKit {
     this._grassMats = [];
     this.instChunks = [];
     this.batcher = new ChunkBatcher(scene, 35);
+    this.added = [];             // every placed prop (generated maps may remove some)
+    this.boulderCols = new Set(); // colliders that belong to boulders
   }
 
   g(x, z) { const h = this.world.groundHeight(x, z); return Number.isFinite(h) ? h : 0; }
@@ -83,7 +85,23 @@ export class PropKit {
     obj.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
     this.scene.add(obj);
     this.batcher.add(obj); // merged into chunks by bake()
+    this.added.push(obj);
     return obj;
+  }
+
+  // Remove a collider and the props standing on it (before bake()).
+  // Generated maps use this to open up pockets the monster can't reach.
+  removeCollider(box) {
+    const i = this.world.colliders.indexOf(box);
+    if (i >= 0) this.world.colliders.splice(i, 1);
+    this.world._gridDirty = true;
+    this.boulderCols.delete(box);
+    const on = (o) => o.position.x > box.min.x - 0.1 && o.position.x < box.max.x + 0.1 &&
+      o.position.z > box.min.z - 0.1 && o.position.z < box.max.z + 0.1;
+    const gone = new Set(this.added.filter(on));
+    for (const o of gone) o.parent?.remove(o);
+    this.batcher.pending = this.batcher.pending.filter((o) => !gone.has(o));
+    this.added = this.added.filter((o) => !gone.has(o));
   }
 
   // Call once after all props are placed.
@@ -282,7 +300,7 @@ export class PropKit {
     const g = this.g(x, z);
     m.position.set(x, g + sy * 0.45, z);
     this._add(m);
-    if (collider) this._colliderFrom(m, 0.8, 0.97);
+    if (collider) this.boulderCols.add(this._colliderFrom(m, 0.8, 0.97));
     return m;
   }
 
