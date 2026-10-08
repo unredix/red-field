@@ -33,10 +33,22 @@ Pick the map on the start / pause screen:
     - **junk:** instruments, drums, speaker stacks;
     - **rocks:** boulders, hilly, thin grass.
   - **Landmarks:** 3 from chapel graveyard, orchestra clearing, dead forest, boulder canyon, junkyard (`src/maps/landmarks.js`). Each forces its own biome around it.
-  - **Fairness:** tall-grass hiding patches are spread evenly (never more than about 22 m from cover). Pockets the monster couldn't reach (possible safe spots) are opened by removing a boulder.
+  - **Structures:** 9–13 per map, chosen by biome. All are axis-aligned and built in 2 m pieces:
+    - **ruined stone walls** (2.2–3.6 m; straight, L or U runs): block the monster and sightlines, and you can climb them. Each has a gateway where a path crosses, a breach the monster fits through, and sometimes a one-block gap only you fit through. They keep 4 m clear of other solids so the monster can get round the ends.
+    - **low dry-stone walls and dead bramble hedges** (about 1 m): you vault them, the monster crashes through, and crouching behind one hides you.
+    - **barricades:** rings of crate stacks, coffins and upright pianos with two openings and a crate to climb.
+  - **Fairness:**
+    - Tall-grass hiding patches are spread evenly (never more than about 23 m from cover).
+    - Every spot you can reach, on foot or climbing (jump + mantle ≈ 3.5 m, hopping between tops), must be within the monster's bite: no more than 5 m from where it can stand and no more than 6 m below it. Otherwise the nearest boulder, wall block or crate stack is knocked out.
   - **Seeds:** the same seed always gives the same map. **New seed** or **N** on the death / win screen rolls a new one; **Copy link** shares it (`?map=random&seed=123`).
   - Every map is checked at load: if the monster couldn't reach a tower or your spawn, the next seed is used.
-  - **Dev checks:** `await game.sweep(1, 50)` builds seeds off-screen and checks them against quality gates (`src/maps/mapcheck.js`). `game.topView()` toggles an overhead view.
+  - **Dev checks:**
+    - `await game.sweep(1, 50)` builds seeds off-screen and checks them against quality gates (`src/maps/mapcheck.js`).
+    - `game.topView()` toggles an overhead view; `game.topView(true, {x, z, h})` looks at one spot.
+    - Headless monster tests (`src/devtests.js`):
+      - `await game.reachTest({ from: 1, to: 20 })` makes the monster hunt a player standing still at sampled spots (open ground, hard-to-reach ground, tops of props) and reports how long the bite took;
+      - `game.rushSim(...)` and `game.rushPace()` check the charge balance;
+      - `game.traceChase({ map, seed, x, z })` logs one chase step by step.
 
 Best times are saved separately for classic and random maps.
 
@@ -111,11 +123,28 @@ The monster is 1.5× the original size.
 
 **Attack:** a 0.6 s windup (eyes flare, cymbal crash), then a lunge. One bite kills. Dodge by sidestepping or backing off, or parry.
 
+**Charge** (chases only; tune `rush*` in `MONSTER_CONFIG`):
+- **When:** every 9–13 s (the first 5 s into a chase), when you're 10–26 m away in plain sight with a clear run.
+- **Tell (0.7 s):** it crouches, its eyes flare, and a drum roll builds under a growl.
+- **Charge (≤ 1.5 s):** chase speed + 3.5 m/s (12–14 m/s), but it turns at a third of its normal rate. Sidestepping beats it.
+- **Close enough:** it goes straight into the normal telegraphed, parryable bite.
+- **Hits something solid** (you put a wall between you): it slams into it.
+- **Afterwards:** it is winded and panting for 2 s (2.5 s after a slam) at half speed.
+- **Balance:**
+  - in simulation a straight-line sprinter is never caught by a charge alone, a sidestepper is never bitten, and a player standing still always is;
+  - average chase speed is slightly *lower* with charges (7.4 vs 7.8 m/s early, 9.7 vs 10.5 m/s late): chases are spikier, not harder.
+
 **Parry:** its eyes flash **white** (with a bright *ting*) for the last 0.25 s of the windup; a claw hit landing then, or in the first 0.06 s of the lunge, is a parry. You get impact frames (a 0.13 s freeze, white flash, camera punch, sparks), the beast is knocked back about 1.5 m and stunned for 4 s. Slashing earlier only gives a normal 2.5 s stun (tune `parryWindow` / `parryGrace` in `MONSTER_CONFIG`). It **rears up to bite players up to 6.5 m above its feet**, so rocks and speaker stacks aren't safe.
 
 **Speed:** chase speed ramps from 7.8 m/s (just under your 8.2 m/s sprint) to 10.5 m/s over 5 minutes.
 
 **Pathfinding:** it uses A* on a navigation grid. It **crashes straight through anything smaller than the player**: shorter than 1.8 m or thinner than 1 m, such as crosses, trees, fences, tombstones, pianos, pews and standing stones (see `World.markSmall`). It still can't fit through gaps under about 3.2 m between big obstacles: canyon gaps, the chapel's back door, narrow rock pairs. If it stops making progress it backs off sideways and re-plans.
+
+**There's nowhere it can't get you.** Paths are planned only inside the area it can actually walk.
+- **Somewhere it can't stand** (a narrow gap, against the far side of a wall, on a rock): it goes to the closest spot it can stand that can see you, and bites from there.
+- **Still no bite:** if it got there and still can't bite you for 2.5 s (or two bites missed), it **squeezes**. It crawls (scraping sound) at 2.6 m/s through gaps only you normally fit through (a 0.45 m body radius) and under anything above 1.6 m, such as door beams and the shed roof.
+- **Wedged:** if it wants to move but hasn't moved 2 m in 5 s, it hops 6 m along its path. This only happens when you're more than 12 m away and it isn't on screen.
+- **Testing:** in testing it reached and bit a player at every one of 151 spots on the classic map and seeds 1–20, including the classic canyon pockets and the corner under the shed roof (median 10 s, worst 29 s).
 
 ## Right arm (`src/arm.js`)
 
@@ -137,7 +166,8 @@ The monster is 1.5× the original size.
 - `src/maps/redfield.js`: the classic 140 × 140 m map.
 - `src/maps/generated.js`, `src/maps/landmarks.js`: the seeded random map and its set pieces.
 - `src/maps/common.js`: terrain, sky, embers, baked height/distance fields, value noise, path and placement helpers shared by both.
-- `src/maps/mapcheck.js`: quality checks for generated maps (used by `game.sweep()`).
+- `src/maps/mapcheck.js`: quality checks for generated maps (used by `game.sweep()`), including the "can the monster bite you everywhere you can go" check.
+- `src/devtests.js`: headless monster tests (`game.reachTest`, `game.rushSim`, `game.rushPace`, `game.traceChase`).
 - `src/fx.js`: pooled spark bursts.
   - **Centre:** the blood pool, the shed and the piano.
   - **North:** a fenced graveyard with a ruined chapel. Its big front door fits the monster, its back door doesn't, and you can vault through its windows.

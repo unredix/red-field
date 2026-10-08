@@ -103,7 +103,7 @@ let deathT = 0;
 let slowmoT = 0;
 let timeScale = 1;
 let flashRed = 0;
-let debugTop = false, debugLight = null, debugFog = 0; // game.topView()
+let debugTop = false, debugLight = null, debugFog = 0, debugAt = null; // game.topView()
 let hitStopT = 0;   // impact frames: the world freezes (real seconds)
 let flashWhiteT = 0;
 const deathFrom = new THREE.Vector3();
@@ -135,14 +135,21 @@ window.game = {
       const sc = new THREE.Scene(), w = new World(sc);
       const t0 = performance.now();
       const L = buildGenerated(sc, w, s);
-      rows.push({ ...checkMap(w, L, performance.now() - t0), landmarks: L.layout.landmarks.join('/'), opened: L.layout.opened });
+      rows.push({ ...checkMap(w, L, performance.now() - t0), landmarks: L.layout.landmarks.join('/'), opened: L.layout.opened, structs: Object.values(L.layout.structs).join('/') });
       sc.traverse((o) => { o.geometry?.dispose?.(); for (const m of [].concat(o.material || [])) { m.map?.dispose?.(); m.dispose?.(); } });
     }
     return rows;
   },
+  // dev: headless monster tests (src/devtests.js)
+  reachTest: async (o) => (await import('./devtests.js')).reachTest(o),
+  rushSim: async (o) => (await import('./devtests.js')).rushSim(o),
+  traceChase: async (o) => (await import('./devtests.js')).traceChase(o),
+  rushPace: async (o) => (await import('./devtests.js')).rushPace(o),
   // dev: overhead view of the whole map (temporary light, no fog) for layout screenshots
-  topView: (on = !debugTop) => {
+  // (pass {x, z, h} to look at one spot from h m up)
+  topView: (on = !debugTop, at = null) => {
     debugTop = on;
+    debugAt = at;
     if (on) {
       debugLight ||= new THREE.HemisphereLight(0xffffff, 0x886666, 4);
       scene.add(debugLight);
@@ -221,6 +228,18 @@ if (monster) {
     soundCue(p, 0.6);
     if (state === 'playing') hints.show('sniff', "It's following your scent. Wade through a blood pool to wash it off.");
   };
+  monster.onRush = (p) => {
+    sfx.rushCue(p);
+    soundCue(p, 1);
+    if (state === 'playing') hints.show('rush', 'It crouches and drums before it charges. Sidestep, or put something solid between you.');
+  };
+  monster.onSlam = (p) => {
+    sfx.slam(p);
+    if (state === 'playing') player.addShake(0.5 * nearK(p, 25));
+    soundCue(p, 0.9);
+  };
+  monster.onPant = (p) => sfx.pant(p);
+  monster.onScrape = (p) => { sfx.scrape(p); soundCue(p, 0.5); };
   monster.onCollapse = () => {
     flashRed = -1.6;
     sfx.drum(monster.pos, 1.6);
@@ -924,13 +943,15 @@ function frame() {
       `speed  ${player.speed.toFixed(2)} m/s\n` +
       `pos    ${p.x.toFixed(1)} ${p.y.toFixed(2)} ${p.z.toFixed(1)}\n` +
       `stam   ${(player.stamina * 100).toFixed(0)}%   arm ${arm.charges}\n` +
-      (monster ? `monster ${monster.state}  aware ${monster.awareness.toFixed(2)}  dist ${monster.pos.distanceTo(p).toFixed(1)}\n` : '');
+      (monster ? `monster ${monster.state}${monster.rush ? ` (${monster.rush.phase})` : ''}${monster.squeezing ? ' (squeezing)' : ''}  aware ${monster.awareness.toFixed(2)}  dist ${monster.pos.distanceTo(p).toFixed(1)}\n` +
+        `         rush in ${Math.max(0, monster.rushCd).toFixed(1)}s  unstuck ${monster.unstuckCount}\n` : '');
   }
 
   input.endFrame();
   if (debugTop) {
-    camera.position.set(0, 165, 75);
-    camera.lookAt(0, 0, 4);
+    const v = debugAt || { x: 0, z: 4, h: 165 };
+    camera.position.set(v.x, v.h, v.z + v.h * 0.45);
+    camera.lookAt(v.x, 0, v.z);
     camera.fov = 60; camera.updateProjectionMatrix();
   }
   renderer.clear();

@@ -18,6 +18,29 @@ export const MONSTER_CONFIG = {
   chaseSpeedEnd: 10.5,
   chaseRampTime: 300,     // seconds of survival to reach full speed
   enragedBonus: 0.8,
+
+  // charge bursts during a chase: tell (crouch + drum roll) -> charge -> winded
+  rushMinDist: 10,        // only when you're this far...
+  rushMaxDist: 26,        // ...but not further, in sight, with a clear run
+  rushFirst: 5,           // s into a chase before the first one
+  rushCooldown: 9,        // s between them (+ up to rushCooldownRand)
+  rushCooldownRand: 4,
+  rushTell: 0.7,
+  rushTime: 1.5,
+  rushBonus: 3.5,         // charge speed = chase speed + this, clamped to:
+  rushMinSpeed: 12,
+  rushMaxSpeed: 14,
+  rushTurn: 0.35,         // turn rate multiplier while charging (a sidestep beats it)
+  rushWinded: 2,          // s of slow panting afterwards
+  rushSlamWinded: 2.5,    // ...longer if it slams into something solid
+  rushWindedSpeed: 0.5,   // fraction of chase speed while winded
+
+  // reaching you anywhere
+  squeezeAfter: 2.5,      // s it can't reach you normally before it squeezes through gaps
+  squeezeRadius: 0.45,    // body radius while squeezing
+  squeezeSpeed: 2.6,
+  squeezeTop: 1.6,        // ...and crawls under anything higher than this (door beams, a shed roof)
+  unstickWindow: 5,       // moved < 2 m in this long while trying to move -> stuck
   turnRate: 2.4,          // rad/s while moving
   accel: 7,
 
@@ -130,6 +153,17 @@ export class Monster {
     this.rear = 0;
     this.bodyPitch = 0;
     this.stuckT = 0;
+    this.rush = null;
+    this.rushCd = C.rushFirst;
+    this.squeezing = false;
+    this.blockedT = 0;
+    this.goalOff = false;
+    this.misses = 0;          // bites that missed you somewhere it can't stand
+    this.wdT = 0;
+    this.wdMoveT = 0;
+    this.wdPos = (this.wdPos || new THREE.Vector3()).copy(this.pos);
+    this.wantMove = false;
+    this.unstuckCount = this.unstuckCount || 0;
     this.detourT = 0;
     this.detour = null;
     this.losT = 0;
@@ -166,6 +200,10 @@ export class Monster {
     this.stateT = 0;
     this.path = null;
     this.repathT = 0;
+    if (this.rush?.phase === 'charge' || this.rush?.phase === 'winded') this.rushCd = C.rushCooldown;
+    this.rush = null;
+    this.blockedT = 0;
+    if (s === 'CHASE') this.rushCd = Math.max(this.rushCd, C.rushFirst);
   }
 
   _setGoal(p) {
@@ -186,7 +224,15 @@ export class Monster {
     const d = _eye.distanceTo(_pt);
 
     this.losT -= dt;
-    if (this.losT <= 0) { this.los = this.world.lineOfSight(_eye, _pt); this.losT = 0.1; }
+    if (this.losT <= 0) {
+      this.los = this.world.lineOfSight(_eye, _pt);
+      // right on top of you, its head can poke past you into a wall: look from its body too
+      if (!this.los && Math.hypot(player.pos.x - this.pos.x, player.pos.z - this.pos.z) < 4) {
+        _v.set(this.pos.x, this.pos.y + (this.squeezing ? 1.2 : 2.2), this.pos.z);
+        this.los = this.world.lineOfSight(_v, _pt);
+      }
+      this.losT = 0.1;
+    }
 
     let gain = 0;
     let seen = false;
@@ -238,18 +284,59 @@ export class Monster {
   }
 
   // ---------------------------------------------------------------- movement
+  // Plan a path to the goal. If you're somewhere it can't stand (a narrow gap,
+  // against the far side of a wall, on a rock), it heads for the closest spot it
+  // can stand that sees you. If it has got there and still can't bite you, it
+  // squeezes through the gaps only the player normally fits through (slowly), so
+  // there's nowhere it can never get to.
+  _plan() {
+    const w = this.world, goal = this.goal;
+    let target = goal;
+    this.goalOff = !!w.nav && w.compAt(goal.x, goal.z) !== w.nav.main;
+    if (!this.goalOff) this.misses = 0;
+    if (this.goalOff) {
+      const y = Math.max(goal.y, this.ground(goal.x, goal.z)) + 1;
+      target = w.nearestVisible(goal.x, goal.z, y, w.nav.main) || goal;
+    }
+    const path = w.findPath(this.pos, target) || [target.clone()];
+    const onNormal = !w.nav || w.walkable(this.pos.x, this.pos.z);
+    if (this.squeezing && onNormal && !this.goalOff) this.squeezing = false;
+    if (!this.squeezing && w.navSqueeze && (this.blockedT > C.squeezeAfter || this.misses >= 2)) {
+      const sq = w.findPath(this.pos, goal, w.navSqueeze);
+      const e = sq && sq[sq.length - 1];
+      if (e && Math.hypot(e.x - goal.x, e.z - goal.z) < 1.5) this.squeezing = true;
+      else this.misses = 0; // can't squeeze there either: keep trying to bite from out here
+    }
+    if (this.squeezing) {
+      const sq = w.findPath(this.pos, goal, w.navSqueeze);
+      if (sq) return sq;
+    }
+    return path;
+  }
+
   _followGoal(speed, dt, repathEvery = 0.6) {
     this.repathT -= dt;
     if (this.repathT <= 0 || !this.path) {
-      this.path = this.world.findPath(this.pos, this.goal) || [this.goal.clone()];
-      this.repathT = repathEvery;
+      this.path = this._plan();
+      this.repathT = this.squeezing ? Math.max(repathEvery, 0.8) : repathEvery;
+    }
+    // got as close as it can, but you're still somewhere it can't stand
+    const end = this.path[this.path.length - 1];
+    const arrived = this.path.length <= 1 && Math.hypot(end.x - this.pos.x, end.z - this.pos.z) < 3;
+    this.blockedT = this.goalOff && (arrived || this.misses >= 2) ? this.blockedT + dt : 0;
+    if (this.squeezing) {
+      speed = Math.min(speed, C.squeezeSpeed);
+      this.scrapeT = (this.scrapeT || 0) - dt;
+      if (this.scrapeT <= 0 && this.speed > 0.5) { this.scrapeT = 1.4; this.onScrape?.(this.pos); }
     }
     while (this.path.length > 1 && Math.hypot(this.path[0].x - this.pos.x, this.path[0].z - this.pos.z) < 1.8) this.path.shift();
     const wp = this.path[0];
     const dist = Math.hypot(this.goal.x - this.pos.x, this.goal.z - this.pos.z);
 
+    if (dist > 3 && speed > 1) this.wantMove = true;
+
     // stuck against something: back off sideways for a moment, then re-plan
-    if (this.stuckT > 0.8 && this.detourT <= 0) {
+    if (this.stuckT > 0.8 && this.detourT <= 0 && !this.squeezing) {
       const side = Math.random() < 0.5 ? 1 : -1;
       const a = this.yaw + side * (Math.PI * 0.6 + Math.random() * 0.5);
       const tx = this.pos.x + Math.sin(a) * 6, tz = this.pos.z + Math.cos(a) * 6;
@@ -265,22 +352,29 @@ export class Monster {
       return dist;
     }
 
-    // goal itself unreachable (e.g. you're on a rock): stop at the closest point and face it
-    const atEnd = this.path.length === 1 && Math.hypot(wp.x - this.pos.x, wp.z - this.pos.z) < 1.2;
-    if (atEnd && dist > 2.2) this._steer(this.goal.x, this.goal.z, 0, dt, 1.5);
-    else this._steer(wp.x, wp.z, dist < 2.2 ? 0 : speed, dt);
+    // there (or the goal itself is unreachable, e.g. you're on a rock): stop at the
+    // closest point and face it. Close but with a wall between: keep following the path.
+    const direct = this.path.length <= 1;
+    const atEnd = direct && Math.hypot(wp.x - this.pos.x, wp.z - this.pos.z) < 1.2;
+    if ((atEnd && dist > 2.2) || (direct && dist < 2.2)) this._steer(this.goal.x, this.goal.z, 0, dt, 1.5);
+    else this._steer(wp.x, wp.z, speed, dt);
     return dist;
   }
 
   _steer(tx, tz, speed, dt, turnMul = 1) {
-    const desired = Math.atan2(tx - this.pos.x, tz - this.pos.z);
-    const diff = wrapAngle(desired - this.yaw);
+    const diff = this._turnToward(tx, tz, dt, turnMul);
+    const target = speed * Math.max(0.2, Math.cos(Math.min(Math.abs(diff), Math.PI / 2)));
+    this.speed = damp(this.speed, target, C.accel, dt);
+  }
+
+  // Turn toward (tx, tz) at the turn rate; returns the angle still to go.
+  _turnToward(tx, tz, dt, turnMul = 1) {
+    const diff = wrapAngle(Math.atan2(tx - this.pos.x, tz - this.pos.z) - this.yaw);
     const maxTurn = C.turnRate * turnMul * dt;
     const turn = Math.max(-maxTurn, Math.min(maxTurn, diff));
     this.yaw = wrapAngle(this.yaw + turn);
     this.turnVel = turn / Math.max(dt, 1e-4);
-    const target = speed * Math.max(0.2, Math.cos(Math.min(Math.abs(diff), Math.PI / 2)));
-    this.speed = damp(this.speed, target, C.accel, dt);
+    return diff;
   }
 
   _move(dt) {
@@ -295,11 +389,11 @@ export class Monster {
       this.knockT -= dt;
     }
     // push out of static obstacles (circle vs box in XZ)
-    const r = C.radius;
+    const r = this.squeezing ? C.squeezeRadius : C.radius;
     const g = this.pos.y;
     for (const b of this.world.near(this.pos.x - r, this.pos.z - r, this.pos.x + r, this.pos.z + r)) {
       // it crashes straight through anything smaller than the player (see World.markSmall)
-      if (b.small || b.max.y < g + C.stepOver || b.min.y > g + C.bodyTop) continue;
+      if (b.small || b.max.y < g + C.stepOver || b.min.y > g + (this.squeezing ? C.squeezeTop : C.bodyTop)) continue;
       const cx = Math.max(b.min.x, Math.min(this.pos.x, b.max.x));
       const cz = Math.max(b.min.z, Math.min(this.pos.z, b.max.z));
       const dx = this.pos.x - cx, dz = this.pos.z - cz;
@@ -431,6 +525,10 @@ export class Monster {
     }
     this.stateT += dt;
     this.enragedT -= dt;
+    // the model (and so its head) must be where the body is before anything
+    // measures from it: after a reset or an unstick hop it would still be at the old spot
+    this.model.root.position.copy(this.pos);
+    this.model.root.rotation.y = this.yaw;
 
     const busy = this.state === 'ATTACK' || this.state === 'STUNNED' || this.state === 'TEAR';
     const dPlayer = this._perceive(dt, ctx);
@@ -443,7 +541,9 @@ export class Monster {
     if (!busy && this.lure && this.state !== 'LURED') this._setState('LURED');
 
     const canAttack = player.alive && this.sees && headDist < C.attackRange && facingDiff < 70 * DEG &&
-      player.pos.y - this.pos.y < C.reachHeight;
+      player.pos.y - this.pos.y < C.reachHeight &&
+      // keeps missing you from out here: squeeze in close first
+      !(this.goalOff && this.misses >= 2 && (!this.squeezing || Math.hypot(player.pos.x - this.pos.x, player.pos.z - this.pos.z) > 3.5));
 
     // lost you for a while -> start sniffing for your trail
     this.sniffCheckT -= dt;
@@ -485,10 +585,19 @@ export class Monster {
         break;
       }
       case 'CHASE': {
+        this.rushCd -= dt;
+        if (this.rush) { this._updateRush(dt, ctx, canAttack); break; }
         this._setGoal(this.sees ? player.pos : this.lastKnown);
         this._followGoal(this.chaseSpeed(ctx.time), dt, 0.4);
+        const dBody = Math.hypot(player.pos.x - this.pos.x, player.pos.z - this.pos.z);
         if (canAttack) this._startAttack(player);
         else if (!this.sees && this.lostT > C.loseTime) this._startSearch();
+        else if (this.rushCd <= 0 && this.sees && !player.hidden && !this.squeezing && this.knockT <= 0 &&
+                 dBody > C.rushMinDist && dBody < C.rushMaxDist && Math.abs(player.pos.y - this.pos.y) < 3 &&
+                 (!this.world.nav || this.world._clearLine(this.pos.x, this.pos.z, player.pos.x, player.pos.z))) {
+          this.rush = { phase: 'tell', t: 0, dur: C.rushTell, pantT: 0 };
+          this.onRush?.(this.pos);
+        }
         break;
       }
       case 'SEARCH': {
@@ -561,9 +670,74 @@ export class Monster {
     }
 
     this._move(dt);
+    this._watchdog(dt, ctx);
     this._updateBoxes();
     this._animate(dt, ctx);
     return dPlayer;
+  }
+
+  // ---------------------------------------------------------------- charge bursts
+  _updateRush(dt, ctx, canAttack) {
+    const R = this.rush, player = ctx.player;
+    R.t += dt;
+    if (R.phase === 'tell') { // crouch and drum, keep aiming
+      this._turnToward(player.pos.x, player.pos.z, dt, 1.6);
+      this.speed = damp(this.speed, 0.8, 10, dt);
+      if (R.t >= R.dur) { R.phase = 'charge'; R.t = 0; R.dur = C.rushTime; this.stuckT = 0; }
+    } else if (R.phase === 'charge') { // barrels at you, turns badly
+      const rs = Math.min(Math.max(this.chaseSpeed(ctx.time) + C.rushBonus, C.rushMinSpeed), C.rushMaxSpeed);
+      this._turnToward(player.pos.x, player.pos.z, dt, C.rushTurn);
+      this.speed = damp(this.speed, rs, 10, dt);
+      this.lastKnown.copy(player.pos);
+      if (canAttack) { this._startAttack(player); return; }
+      if (this.stuckT > 0.15 && R.t > 0.25) { // slammed into something solid
+        this.onSlam?.(this.pos);
+        R.phase = 'winded'; R.t = 0; R.dur = C.rushSlamWinded; this.speed = 0;
+      } else if (R.t >= R.dur) { R.phase = 'winded'; R.t = 0; R.dur = C.rushWinded; }
+    } else { // winded: slow, panting, still coming
+      this._setGoal(this.sees ? player.pos : this.lastKnown);
+      this._followGoal(this.chaseSpeed(ctx.time) * C.rushWindedSpeed, dt, 0.4);
+      R.pantT -= dt;
+      if (R.pantT <= 0) { R.pantT = 0.55; this.onPant?.(this.pos); }
+      if (canAttack) { this._startAttack(player); return; }
+      if (R.t >= R.dur) { this.rush = null; this.rushCd = C.rushCooldown + Math.random() * C.rushCooldownRand; }
+    }
+  }
+
+  // ---------------------------------------------------------------- stuck watchdog
+  // Wanted to move for most of the last few seconds but barely did (wedged
+  // between props): hop a few metres along its path, only where you can't see it.
+  _watchdog(dt, ctx) {
+    if (this.wantMove) this.wdMoveT += dt;
+    this.wantMove = false;
+    this.wdT += dt;
+    if (this.wdT < C.unstickWindow) return;
+    const stuck = this.wdMoveT > C.unstickWindow * 0.8 && this.wdPos.distanceTo(this.pos) < 2 && this.path?.length;
+    this.wdT = 0; this.wdMoveT = 0;
+    this.wdPos.copy(this.pos);
+    if (!stuck) return;
+    const { player, camera } = ctx;
+    if (player && Math.hypot(player.pos.x - this.pos.x, player.pos.z - this.pos.z) < 12) return;
+    if (camera) {
+      camera.getWorldDirection(_v3);
+      _v4.copy(this.pos).sub(camera.position);
+      const d = _v4.length();
+      if (d > 1e-3 && _v4.dot(_v3) / d > Math.cos(55 * DEG) && d < 60) return; // on screen
+    }
+    // hop 6 m along the path
+    let left = 6, x = this.pos.x, z = this.pos.z;
+    for (const p of this.path) {
+      const seg = Math.hypot(p.x - x, p.z - z);
+      if (seg >= left) { x += (p.x - x) * (left / seg); z += (p.z - z) * (left / seg); left = 0; break; }
+      left -= seg; x = p.x; z = p.z;
+    }
+    const w = this.world, grid = this.squeezing ? w.navSqueeze : w.nav;
+    const to = grid ? w.nearestWalkable(x, z, grid.main, grid) : new THREE.Vector3(x, 0, z);
+    this.pos.set(to.x, this.ground(to.x, to.z), to.z);
+    this.path = null;
+    this.stuckT = 0;
+    this.unstuckCount++;
+    if (this.rig) this.rig.snap = true;
   }
 
   _startSearch() {
@@ -607,6 +781,7 @@ export class Monster {
       this.speed = damp(this.speed, 0, 6, dt);
       if (t >= C.recover) {
         this.attackPhase = null;
+        if (this.goalOff) this.misses++; // couldn't get at you from out here: squeeze in soon
         if (this.awareness > 0.5) this._setState('CHASE'); else this._startSearch();
       }
     }
@@ -834,6 +1009,11 @@ export class Monster {
       } else { posePitch = 0.05; poseLift = -0.1; }
     }
     if (st === 'TRACK') posePitch = 0.1;
+    const rush = this.rush?.phase;
+    if (rush === 'tell') { const c = Math.min(this.rush.t / 0.3, 1); posePitch = 0.16 * c; poseLift = -0.45 * c; shake = Math.sin(t * 34) * 0.03 * c; }
+    else if (rush === 'charge') { posePitch = 0.12; poseLift = -0.15; }
+    else if (rush === 'winded') { posePitch = 0.1; poseLift = -0.2 + Math.sin(t * 9) * 0.05; }
+    if (this.squeezing && st !== 'ATTACK') { posePitch = 0.05; poseLift = -0.5; }
     if (stunned) { poseLift = -0.35; shake = Math.sin(t * 6) * 0.08; }
     if (feeding) { posePitch = 0.08; poseLift = -0.12; }
     if (dying) { posePitch = -0.35; poseLift = 0.45; shake = Math.sin(t * 38) * 0.06; }
@@ -865,6 +1045,10 @@ export class Monster {
       else { jaw = 0.3; hp = 0.1; }
     }
     if (st === 'TEAR') { jaw = 0.5 + Math.sin(t * 14) * 0.45; hp = 0.5; }
+    if (rush === 'tell') { jaw = 0.6; hp = -0.35 + Math.sin(t * 28) * 0.04; eye = 1.3; }
+    else if (rush === 'charge') { jaw = 0.85; hp = -0.2; eye = 1.1; }
+    else if (rush === 'winded') { jaw = 0.55 + Math.sin(t * 9) * 0.2; hp = 0.4 + Math.sin(t * 9) * 0.06; eye = 0.2; }
+    if (this.squeezing && st !== 'ATTACK') hp = Math.max(hp, 0.25);
     if (st === 'TRACK') { hp = 0.45 + Math.sin(t * 9) * 0.05; jaw = 0.12; }
     if (stunned) { jaw = 0.7; hp = 0.45 + Math.sin(t * 5) * 0.1 - this.recoil * 1.1; eye = -0.7; headRoll = Math.sin(t * 5) * 0.12; }
     this.recoil = Math.max(0, this.recoil - dt * 2.5);

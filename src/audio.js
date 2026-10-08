@@ -149,6 +149,61 @@ export class Sfx {
     this._noise(t, 1.7, hp);
   }
 
+  // Its charge tell: an accelerating drum roll under a low growl.
+  rushCue(pos) {
+    if (!this.ready) return;
+    const t = this.now, out = this._out(pos, 7);
+    let at = 0;
+    for (let i = 0; i < 8; i++) {
+      const g = this.ctx.createGain(); g.connect(out);
+      this._env(g, t + at, 0.004, 0.45 + i * 0.07, 0.22);
+      const o = this._osc('sine', 95 + i * 6, t + at, 0.25, g);
+      o.frequency.exponentialRampToValueAtTime(38, t + at + 0.2);
+      at += 0.13 - i * 0.012;
+    }
+    const g = this.ctx.createGain(); g.connect(out);
+    this._env(g, t, 0.2, 0.3, 0.6);
+    const lp = this.ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 420; lp.connect(g);
+    for (const f of [46, 49]) this._osc('sawtooth', f, t, 0.85, lp);
+  }
+
+  // Charging into a wall: a heavy thud and a crack.
+  slam(pos) {
+    if (!this.ready) return;
+    this.drum(pos, 1.6);
+    const t = this.now, out = this._out(pos, 6);
+    const g = this.ctx.createGain(); g.connect(out);
+    this._env(g, t, 0.002, 0.6, 0.3);
+    const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q.value = 0.7;
+    bp.connect(g);
+    this._noise(t, 0.35, bp);
+  }
+
+  // Winded after a charge: ragged breaths.
+  pant(pos) {
+    if (!this.ready) return;
+    const t = this.now, out = this._out(pos, 5);
+    const g = this.ctx.createGain(); g.connect(out);
+    this._env(g, t, 0.05, 0.3, 0.3);
+    const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.5;
+    bp.frequency.setValueAtTime(450, t);
+    bp.frequency.linearRampToValueAtTime(280, t + 0.3);
+    bp.connect(g);
+    this._noise(t, 0.4, bp);
+  }
+
+  // Squeezing through a narrow gap: stone scraping on its hide.
+  scrape(pos) {
+    if (!this.ready) return;
+    const t = this.now, out = this._out(pos, 5);
+    const g = this.ctx.createGain(); g.connect(out);
+    this._env(g, t, 0.15, 0.25, 0.6);
+    const bp = this.ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1800; bp.Q.value = 3;
+    const am = this.ctx.createGain(); am.gain.value = 0.6; bp.connect(am); am.connect(g);
+    const lfo = this.ctx.createOscillator(); lfo.frequency.value = 23; lfo.connect(am.gain); lfo.start(t); lfo.stop(t + 0.8);
+    this._noise(t, 0.8, bp);
+  }
+
   sniff(pos) {
     if (!this.ready) return;
     const t = this.now, out = this._out(pos, 6);

@@ -3,7 +3,7 @@ import { PropKit } from '../props.js';
 import { mulberry32 } from '../world.js';
 import { buildTerrain, buildBackdrop, buildEmbers, makePathDist, makePlacer, smooth, bakeField, makeNoise } from './common.js';
 import { LANDMARKS } from './landmarks.js';
-import { deepPockets } from './mapcheck.js';
+import { unreachableSpots } from './mapcheck.js';
 
 // Seeded random Red Field. Same size, sky, fog and prop budget as the classic map:
 //   1. layout: spawn on an edge, 3 towers >= 60 m apart, 2 blood pools covering
@@ -15,8 +15,10 @@ import { deepPockets } from './mapcheck.js';
 //   4. zones: the map is split into 6-8 biome regions (field, graves, deadwood,
 //      junk, rocks); landmarks force their own. Each zone has its own ground
 //      tint, hilliness, prop palette and density
-//   5. props: landmarks, zone filler up to a fixed density budget, tall grass spread
-//      evenly (farthest-point), then pockets the monster can't reach are opened up
+//   5. props: landmarks, structures (ruined stone walls, low walls / hedges, crate
+//      and coffin barricades), zone filler up to a fixed density budget, tall grass
+//      spread evenly (farthest-point), then every spot the player can get to but
+//      the monster can't bite is opened up
 //   6. the monster spawns far away, out of sight of the player
 // The same seed always builds the same map.
 
@@ -28,23 +30,29 @@ const RAVINE_C = new THREE.Color(0.34, 0.08, 0.06);
 const MAX_SLOPE = 0.47; // props avoid ground steeper than ~25 degrees
 
 // Biomes. tint/tintK: ground colour; rough: hill height factor; density: how
-// much filler (relative); palette: [prop, weight]; grass: short grass kept (0..1).
+// much filler (relative); palette: [prop, weight]; grass: short grass kept (0..1);
+// structures: [type, weight] for walls / hedges / barricades built in the zone.
 const ZONES = {
   field:    { tint: new THREE.Color(1.05, 0.34, 0.3), tintK: 0.2, rough: 0.6, density: 0.45, grass: 1,
-              palette: [['cross', 5], ['instrument', 3], ['boulder', 1], ['bassDrum', 1]] },
+              palette: [['cross', 5], ['instrument', 3], ['boulder', 1], ['bassDrum', 1]],
+              structures: [['stoneWall', 2], ['lowWall', 3]] },
   graves:   { tint: new THREE.Color(0.62, 0.4, 0.38), tintK: 0.45, rough: 0.85, density: 1.3, grass: 0.85,
-              palette: [['cross', 4], ['tombstone', 5], ['tree', 1], ['boulder', 0.5]] },
+              palette: [['cross', 4], ['tombstone', 5], ['tree', 1], ['boulder', 0.5]],
+              structures: [['stoneWall', 3], ['lowWall', 1], ['barricade', 1]] },
   deadwood: { tint: new THREE.Color(0.5, 0.24, 0.17), tintK: 0.5, rough: 1, density: 1.25, grass: 0.75,
-              palette: [['tree', 6], ['boulder', 3], ['cross', 1]] },
+              palette: [['tree', 6], ['boulder', 3], ['cross', 1]],
+              structures: [['hedge', 3]] },
   junk:     { tint: new THREE.Color(0.95, 0.42, 0.22), tintK: 0.4, rough: 0.9, density: 1, grass: 0.8,
-              palette: [['instrument', 4], ['bassDrum', 2], ['speakers', 1.5], ['cross', 1], ['boulder', 1.5]] },
+              palette: [['instrument', 4], ['bassDrum', 2], ['speakers', 1.5], ['cross', 1], ['boulder', 1.5]],
+              structures: [['barricade', 3], ['stoneWall', 1]] },
   rocks:    { tint: new THREE.Color(0.58, 0.43, 0.41), tintK: 0.45, rough: 1.55, density: 1, grass: 0.5,
-              palette: [['boulder', 7], ['cross', 1], ['tree', 1.5]] },
+              palette: [['boulder', 7], ['cross', 1], ['tree', 1.5]],
+              structures: [['stoneWall', 1]] },
 };
 const ZONE_TYPES = Object.keys(ZONES);
 const _tint = new THREE.Color();
 const DENSITY = 335;       // collider budget before the towers (classic map: ~426 in total)
-const GRASS_PATCHES = 29;  // tall hiding grass
+const GRASS_PATCHES = 31;  // tall hiding grass
 
 export function buildGenerated(scene, world, seed) {
   const timings = {}, t0 = performance.now();
@@ -389,6 +397,70 @@ export function buildGenerated(scene, world, seed) {
     for (const [k, w] of pal) if ((v -= w) <= 0) return k;
     return pal[0][0];
   };
+  // structures: wall runs and barricades from the zone's list. Stone walls keep
+  // 4+ m from other solids (the monster gets round their ends), get gateways where
+  // paths cross and one breach it fits through; single missing blocks are player-only gaps.
+  const structs = { stoneWall: 0, lowWall: 0, hedge: 0, barricade: 0 }, structAt = [];
+  const steepAt = (x, z) => slope(x, z) > MAX_SLOPE;
+  const wantStructs = 9 + Math.floor(krnd() * 5);
+  for (let i = 0, made = 0; i < 500 && made < wantStructs; i++) {
+    const x = KR(-58, 58), z = KR(-58, 58);
+    const Z = ZONES[zoneAt(x, z).type];
+    const type = pick(Z.structures);
+    if (type === 'barricade') {
+      if (!clear(x, z, 5, 2) || pathDist(x, z) < 7) continue;
+      const graves = zoneAt(x, z).type === 'graves';
+      const n = 5 + Math.floor(krnd() * 3), a0 = krnd() * 6, gapAt = Math.floor(krnd() * n);
+      for (let k = 0; k < n; k++) {
+        if (k === gapAt || k === (gapAt + Math.floor(n / 2)) % n) continue; // two openings
+        const a = a0 + (k / n) * Math.PI * 2, rr = KR(3, 4.2);
+        const px = x + Math.cos(a) * rr, pz = z + Math.sin(a) * rr;
+        if (steepAt(px, pz)) continue;
+        const v = krnd();
+        if (graves ? v < 0.6 : v < 0.2) kit.coffin(px, pz, a + Math.PI / 2 + KR(-0.4, 0.4), krnd() < 0.35);
+        else if (v < 0.75) kit.crateStack(px, pz, 2 + Math.floor(krnd() * 2), KR(-0.25, 0.25));
+        else if (graves) kit.crateStack(px, pz, 1, KR(-0.3, 0.3));
+        else kit.uprightPiano(px, pz, a + Math.PI / 2);
+      }
+      if (krnd() < 0.6) kit.crateStack(x + KR(-1, 1), z + KR(-1, 1), 1, KR(-0.3, 0.3)); // something to climb
+      claim(x, z, 5);
+      structs.barricade++; made++; structAt.push({ type, x, z });
+      continue;
+    }
+    // a run: straight, L or (stone walls only) U shaped legs along x / z
+    const stone = type === 'stoneWall';
+    const shape = krnd(), ax = krnd() < 0.5, sgn = krnd() < 0.5 ? -1 : 1;
+    const L1 = Math.round(KR(4, stone ? 7 : 8)) * 2, L2 = Math.round(KR(3, 5)) * 2;
+    const legs = [];
+    const leg = (x1, z1, dx, dz) => { legs.push([x1, z1, x1 + dx, z1 + dz]); return [x1 + dx, z1 + dz]; };
+    let [ex, ez] = ax ? leg(x, z, L1, 0) : leg(x, z, 0, L1);
+    if (shape > 0.5) [ex, ez] = ax ? leg(ex, ez, 0, L2 * sgn) : leg(ex, ez, L2 * sgn, 0);
+    if (stone && shape > 0.85) ax ? leg(ex, ez, -L1, 0) : leg(ex, ez, 0, -L1);
+    const pts = [];
+    for (const [x1, z1, x2, z2] of legs) {
+      const n = Math.max(1, Math.round(Math.hypot(x2 - x1, z2 - z1) / 2));
+      for (let k = 0; k <= n; k++) pts.push([x1 + (x2 - x1) * (k / n), z1 + (z2 - z1) * (k / n)]);
+    }
+    const margin = stone ? 3.2 : 1.5;
+    if (!pts.every(([px, pz]) => Math.abs(px) < 62 && Math.abs(pz) < 62 && clear(px, pz, 0.8, margin))) continue;
+    const bad = pts.filter(([px, pz]) => steepAt(px, pz) || pathDist(px, pz) < 2.4).length;
+    if (bad > pts.length * 0.35) continue; // mostly on a path or a slope
+    for (const [x1, z1, x2, z2] of legs) {
+      if (stone) {
+        const n = Math.max(1, Math.round(Math.hypot(x2 - x1, z2 - z1) / 2));
+        const breach = n >= 5 ? 1 + Math.floor(krnd() * (n - 3)) : -9; // 2 blocks: the monster fits
+        const hole = n >= 4 && krnd() < 0.6 ? Math.floor(krnd() * n) : -9; // 1 block: player only
+        kit.stoneWall(x1, z1, x2, z2, KR(2.6, 3.3), (px, pz, k) =>
+          pathDist(px, pz) < 2.4 || steepAt(px, pz) || k === breach || k === breach + 1 || k === hole);
+      } else {
+        const skip = (px, pz) => pathDist(px, pz) < 1.8 || steepAt(px, pz);
+        if (type === 'hedge') kit.hedge(x1, z1, x2, z2, skip); else kit.lowWall(x1, z1, x2, z2, skip);
+      }
+    }
+    for (const [px, pz] of pts) claim(px, pz, 0.8);
+    structs[type]++; made++; structAt.push({ type, x, z });
+  }
+
   for (let i = 0; i < 8000 && world.colliders.length < DENSITY; i++) {
     const x = KR(-66, 66), z = KR(-66, 66);
     const Z = ZONES[zoneAt(x, z).type];
@@ -457,27 +529,32 @@ export function buildGenerated(scene, world, seed) {
   mark('props');
 
   // ------------------------------------------------------------------ navigation + fairness
-  // open up pockets the monster can't reach (a player could hide there forever):
-  // remove the nearest boulder (or speaker stack) around each pocket until none are left
-  const buildNav = () => { world.markSmall(1.8, 1.0); world.buildNav(-HALF, -HALF, HALF, HALF, 1, 1.6, 0.9, 3.6); };
+  // every spot the player can get to (on foot or climbing) must be within the
+  // monster's bite: knock out the nearest removable piece (boulder, wall block,
+  // crate stack) next to any that isn't, until none are left
+  const buildNav = (squeeze = 0) => { world.markSmall(1.8, 1.0); world.buildNav(-HALF, -HALF, HALF, HALF, 1, 1.6, 0.9, 3.6, squeeze); };
   buildNav();
   let opened = 0;
-  for (let pass = 0; pass < 8; pass++) {
-    const pockets = deepPockets(world);
-    if (!pockets.length) break;
-    for (const pk of pockets) {
+  for (let pass = 0; pass < 10; pass++) {
+    const spots = unreachableSpots(world, { spawn });
+    if (!spots.length) break;
+    for (const sp of spots) {
       let best = null, bestD = Infinity;
-      for (const b of world.colliders) {
-        const boulder = kit.boulderCols.has(b);
-        if (b.small || (!boulder && (b.max.y - b.min.y > 6 || b.max.x - b.min.x > 6 || b.max.z - b.min.z > 6))) continue; // not walls
-        const cx = Math.max(b.min.x, Math.min(pk.x, b.max.x)), cz = Math.max(b.min.z, Math.min(pk.z, b.max.z));
-        const d = Math.hypot(cx - pk.x, cz - pk.z) - (kit.boulderCols.has(b) ? 1 : 0); // prefer boulders
-        if (d < bestD) { bestD = d; best = b; }
+      if (sp.kind === 'top') best = kit.removable.has(sp.top) ? sp.top : sp.from && kit.removable.has(sp.from) ? sp.from : null;
+      if (!best) {
+        for (const b of world.colliders) {
+          const removable = kit.removable.has(b);
+          if (b.small || (!removable && (b.max.y - b.min.y > 6 || b.max.x - b.min.x > 6 || b.max.z - b.min.z > 6))) continue; // not walls
+          const cx = Math.max(b.min.x, Math.min(sp.x, b.max.x)), cz = Math.max(b.min.z, Math.min(sp.z, b.max.z));
+          const d = Math.hypot(cx - sp.x, cz - sp.z) - (removable ? 1 : 0); // prefer removable pieces
+          if (d < bestD) { bestD = d; best = b; }
+        }
       }
-      if (best) { kit.removeCollider(best); opened++; }
+      if (best && world.colliders.includes(best)) { kit.removeCollider(best); opened++; }
     }
     buildNav();
   }
+  buildNav(0.45); // with the fine grid for squeezing through gaps
   mark('nav');
   const chunks = kit.bake();
   mark('merge');
@@ -539,7 +616,7 @@ export function buildGenerated(scene, world, seed) {
     terrain: { ridges: ridges.map((q) => q.pts), ravine: ravine && ravine.pts, slope },
     zones: zones.map((zn) => ({ x: zn.x, z: zn.z, type: zn.type })),
     zoneAt: (x, z) => zoneAt(x, z).type,
-    layout: { spawn, towers, monster, pools, landmarks: landmarks.map((L) => L.type), paths: paths.length, grassPatches: patches.length, opened },
+    layout: { spawn, towers, monster, pools, landmarks: landmarks.map((L) => L.type), paths: paths.length, grassPatches: patches.length, opened, structs, structAt },
     stats: { chunks, colliders: world.colliders.length },
     setQuality: (q) => kit.setQuality(q),
     update(dt, time, camera) {

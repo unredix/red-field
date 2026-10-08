@@ -71,12 +71,13 @@ export class PropKit {
       candle: new THREE.MeshStandardMaterial({ color: 0xd8ccb0, roughness: 0.6 }),
       flame: new THREE.MeshBasicMaterial({ color: new THREE.Color(3, 1.3, 0.3) }),
       rope: new THREE.MeshStandardMaterial({ color: 0x4a3a28, roughness: 1 }),
+      hedge: new THREE.MeshStandardMaterial({ color: 0x0e0504, roughness: 1, flatShading: true }),
     };
     this._grassMats = [];
     this.instChunks = [];
     this.batcher = new ChunkBatcher(scene, 35);
     this.added = [];             // every placed prop (generated maps may remove some)
-    this.boulderCols = new Set(); // colliders that belong to boulders
+    this.removable = new Set(); // colliders generated maps may knock out (boulders, wall blocks, crate stacks)
   }
 
   g(x, z) { const h = this.world.groundHeight(x, z); return Number.isFinite(h) ? h : 0; }
@@ -95,7 +96,7 @@ export class PropKit {
     const i = this.world.colliders.indexOf(box);
     if (i >= 0) this.world.colliders.splice(i, 1);
     this.world._gridDirty = true;
-    this.boulderCols.delete(box);
+    this.removable.delete(box);
     const on = (o) => o.position.x > box.min.x - 0.1 && o.position.x < box.max.x + 0.1 &&
       o.position.z > box.min.z - 0.1 && o.position.z < box.max.z + 0.1;
     const gone = new Set(this.added.filter(on));
@@ -300,7 +301,7 @@ export class PropKit {
     const g = this.g(x, z);
     m.position.set(x, g + sy * 0.45, z);
     this._add(m);
-    if (collider) this.boulderCols.add(this._colliderFrom(m, 0.8, 0.97));
+    if (collider) this.removable.add(this._colliderFrom(m, 0.8, 0.97));
     return m;
   }
 
@@ -482,6 +483,164 @@ export class PropKit {
       const hw = 0.08;
       this.world.addCollider(Math.min(ax, bx) - hw, g - 0.5, Math.min(az, bz) - hw, Math.max(ax, bx) + hw, g + 0.85, Math.max(az, bz) + hw);
     }
+  }
+
+  // ---------------------------------------------------------------- walls (generated maps)
+  // All runs go along x or z (colliders are axis-aligned boxes) in 2 m pieces.
+  // skip(x, z, i): true = leave piece i out (gateways, steep ground, breaches).
+  _run(x1, z1, x2, z2, piece) {
+    const alongX = Math.abs(x2 - x1) >= Math.abs(z2 - z1);
+    const len = alongX ? Math.abs(x2 - x1) : Math.abs(z2 - z1);
+    const n = Math.max(1, Math.round(len / 2)), seg = len / n, dir = Math.sign(alongX ? x2 - x1 : z2 - z1) || 1;
+    for (let i = 0; i < n; i++) {
+      const u = (i + 0.5) * seg * dir;
+      piece(alongX ? x1 + u : x1, alongX ? z1 : z1 + u, i, seg, alongX);
+    }
+    return n;
+  }
+
+  // Lowest ground under a footprint, so pieces never float on slopes.
+  _gMin(x, z, hx, hz) {
+    return Math.min(this.g(x - hx, z - hz), this.g(x + hx, z - hz), this.g(x - hx, z + hz), this.g(x + hx, z + hz));
+  }
+
+  // Ruined stone wall, 2.2-3.4 m: blocks the monster and sight lines, you can
+  // climb it. Each block is its own collider so single ones can be knocked out.
+  stoneWall(x1, z1, x2, z2, h = 2.8, skip = null) {
+    const t = 1.05 + this.rnd() * 0.15;
+    return this._run(x1, z1, x2, z2, (cx, cz, i, seg, alongX) => {
+      const bh = h * (0.85 + this.rnd() * 0.25), jit = (this.rnd() - 0.5) * 0.08, loose = this.rnd();
+      const sx = alongX ? seg + 0.04 : t, sz = alongX ? t : seg + 0.04;
+      if (skip && skip(cx, cz, i)) { // a breach: just rubble
+        if (loose < 0.7) this.boulder(cx + (this.rnd() - 0.5) * 1.2, cz + (this.rnd() - 0.5) * 1.2, 0.5, 0.3, 0.45, this.rnd() * 6, false);
+        return;
+      }
+      const g = this._gMin(cx, cz, sx / 2, sz / 2);
+      // stacked courses of stone, the top one broken off part-way
+      const courses = 3 + (bh > 2.9 ? 1 : 0), ch = bh / courses, topFrac = 0.35 + this.rnd() * 0.65;
+      const grp = new THREE.Group();
+      for (let k = 0; k < courses; k++) {
+        const top = k === courses - 1, f = top ? topFrac : 1;
+        const len = (alongX ? sx : sz) * f - 0.04, inset = (this.rnd() - 0.5) * 0.1;
+        const h = k === 0 ? ch + 0.6 : ch - 0.03; // the bottom course is sunk into the ground
+        const b = new THREE.Mesh(new THREE.BoxGeometry(alongX ? len : t - Math.abs(inset) * 2, h, alongX ? t - Math.abs(inset) * 2 : len), this.mat.chapel);
+        const shift = top ? ((alongX ? sx : sz) * (1 - f) / 2) * (this.rnd() < 0.5 ? -1 : 1) : (this.rnd() - 0.5) * 0.08;
+        b.position.set(alongX ? shift : inset, k === 0 ? (ch - 0.6) / 2 : k * ch + ch / 2, alongX ? inset : shift);
+        b.rotation.y = (this.rnd() - 0.5) * 0.05;
+        grp.add(b);
+      }
+      grp.position.set(cx, g, cz);
+      grp.rotation.y = jit;
+      this._add(grp);
+      const colTop = topFrac > 0.6 ? bh : Math.max(bh - ch, 1.95); // stays a monster-blocking wall
+      if (loose < 0.35) { // a fallen stone at its foot
+        const side = this.rnd() < 0.5 ? -1 : 1;
+        this.boulder(cx + (alongX ? 0 : side * (t / 2 + 0.4)), cz + (alongX ? side * (t / 2 + 0.4) : 0), 0.45, 0.3, 0.4, this.rnd() * 6, false);
+      }
+      this.removable.add(this.world.addCollider(cx - sx / 2, g - 0.5, cz - sz / 2, cx + sx / 2, g + colTop, cz + sz / 2));
+    });
+  }
+
+  // Waist-high dry-stone wall: you vault it, the monster crashes through it,
+  // and crouching behind it hides you.
+  lowWall(x1, z1, x2, z2, skip = null) {
+    return this._run(x1, z1, x2, z2, (cx, cz, i, seg, alongX) => {
+      const h = 0.95 + this.rnd() * 0.2, missing = this.rnd() < 0.15;
+      if (missing || (skip && skip(cx, cz, i))) return;
+      const sx = alongX ? seg : 0.6, sz = alongX ? 0.6 : seg;
+      const g = this._gMin(cx, cz, sx / 2, sz / 2);
+      const grp = new THREE.Group();
+      const body = new THREE.Mesh(new THREE.BoxGeometry(sx, h + 0.4, sz), this.mat.stone);
+      body.position.y = (h - 0.4) / 2;
+      grp.add(body);
+      for (let k = 0; k < 3; k++) { // capstones
+        const c = new THREE.Mesh(new THREE.BoxGeometry(alongX ? 0.55 : 0.7, 0.16, alongX ? 0.7 : 0.55), this.mat.stone);
+        const u = (k - 1) * seg * 0.3;
+        c.position.set(alongX ? u : 0, h - 0.02, alongX ? 0 : u);
+        c.rotation.y = (this.rnd() - 0.5) * 0.4;
+        grp.add(c);
+      }
+      grp.position.set(cx, g, cz);
+      this._add(grp);
+      this.world.addCollider(cx - sx / 2, g - 0.5, cz - sz / 2, cx + sx / 2, g + h, cz + sz / 2);
+    });
+  }
+
+  // Dead bramble hedge: like the low wall (vault it, it hides you crouched),
+  // a tangle of black thorny bushes.
+  hedge(x1, z1, x2, z2, skip = null) {
+    return this._run(x1, z1, x2, z2, (cx, cz, i, seg, alongX) => {
+      const h = 1.0 + this.rnd() * 0.2, missing = this.rnd() < 0.12;
+      if (missing || (skip && skip(cx, cz, i))) return;
+      const g = this._gMin(cx, cz, alongX ? seg / 2 : 0.45, alongX ? 0.45 : seg / 2);
+      const grp = new THREE.Group();
+      for (let k = 0; k < 3; k++) { // lumpy, spiky clumps
+        const geo = new THREE.IcosahedronGeometry(1, 1), p = geo.attributes.position, sd = this.rnd() * 50;
+        for (let v = 0; v < p.count; v++) {
+          const n = 0.75 + 0.45 * Math.abs(Math.sin(p.getX(v) * 7.3 + sd) * Math.cos(p.getZ(v) * 6.1 + p.getY(v) * 4 + sd));
+          p.setXYZ(v, p.getX(v) * n, p.getY(v) * n, p.getZ(v) * n);
+        }
+        geo.computeVertexNormals();
+        const b = new THREE.Mesh(geo, this.mat.hedge);
+        const u = (k - 1) * seg * 0.33;
+        b.position.set(alongX ? u : 0, h * 0.5, alongX ? 0 : u);
+        b.scale.set(alongX ? seg * 0.3 : 0.48, h * 0.55, alongX ? 0.48 : seg * 0.3);
+        b.rotation.y = this.rnd() * 6;
+        grp.add(b);
+      }
+      for (let k = 0; k < 12; k++) { // thorny twigs poking out
+        const tw = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.03, 1.2, 4), this.mat.bark);
+        tw.position.set((this.rnd() - 0.5) * (alongX ? seg : 0.6), h * (0.5 + this.rnd() * 0.5), (this.rnd() - 0.5) * (alongX ? 0.6 : seg));
+        tw.rotation.set((this.rnd() - 0.5) * 2, this.rnd() * 6, (this.rnd() - 0.5) * 2);
+        grp.add(tw);
+      }
+      grp.position.set(cx, g, cz);
+      this._add(grp);
+      const sx = alongX ? seg : 0.9, sz = alongX ? 0.9 : seg;
+      this.world.addCollider(cx - sx / 2, g - 0.5, cz - sz / 2, cx + sx / 2, g + h, cz + sz / 2);
+    });
+  }
+
+  // Stack of `n` wooden crates. Two or more block the monster (removable).
+  crateStack(x, z, n = 2, rotY = 0) {
+    const s = 1.2 + this.rnd() * 0.2;
+    const grp = new THREE.Group();
+    for (let i = 0; i < n; i++) {
+      const cs = s * (1 - i * 0.06);
+      const crate = new THREE.Group();
+      crate.add(new THREE.Mesh(new THREE.BoxGeometry(cs, cs, cs), this.mat.wood));
+      for (const sy of [-1, 1]) { // dark slats
+        const sl = new THREE.Mesh(new THREE.BoxGeometry(cs + 0.04, 0.1, 0.12), this.mat.neck);
+        sl.position.y = sy * cs * 0.32;
+        crate.add(sl);
+      }
+      crate.position.set((this.rnd() - 0.5) * 0.12, i * s + cs / 2 - i * 0.02, (this.rnd() - 0.5) * 0.12);
+      crate.rotation.y = (this.rnd() - 0.5) * 0.3;
+      grp.add(crate);
+    }
+    const g = this._gMin(x, z, s / 2, s / 2);
+    grp.position.set(x, g, z);
+    grp.rotation.y = rotY;
+    this._add(grp);
+    const hs = s * 0.55, top = g + n * s * 0.98;
+    const col = this.world.addCollider(x - hs, g - 0.5, z - hs, x + hs, top, z + hs);
+    if (n > 1) this.removable.add(col);
+    return col;
+  }
+
+  // Coffin, lying down or stood on end (both thin/short: the monster smashes through).
+  coffin(x, z, rotY = 0, upright = false) {
+    const shape = new THREE.Shape();
+    shape.moveTo(-0.22, -1); shape.lineTo(0.22, -1); shape.lineTo(0.34, 0.45);
+    shape.lineTo(0.24, 1); shape.lineTo(-0.24, 1); shape.lineTo(-0.34, 0.45); shape.closePath();
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.42, bevelEnabled: false });
+    geo.translate(0, 0, -0.21);
+    const m = new THREE.Mesh(geo, this.mat.wood);
+    const g = this.g(x, z);
+    if (upright) { m.position.set(x, g + 1, z); m.rotation.set((this.rnd() - 0.5) * 0.15, rotY, 0); }
+    else { m.position.set(x, g + 0.21, z); m.rotation.set(-Math.PI / 2, 0, rotY); }
+    this._add(m);
+    this._colliderFrom(m, 0.85, 1);
   }
 
   // ---------------------------------------------------------------- dead trees (optionally with a hanging doll)

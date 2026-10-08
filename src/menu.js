@@ -128,7 +128,8 @@ export class Menu {
       ]],
       ['Hiding', [
         `Hold ${kb('hide')} to crouch: you freeze and your light goes dark.`,
-        'In <b>tall grass</b> it only notices you up close. Rocks, ridges and ravines break its line of sight.',
+        'In <b>tall grass</b> it only notices you up close. Rocks, walls, hedges, ridges and ravines break its line of sight.',
+        "Nowhere is safe for long: it can squeeze, slowly, through gaps it doesn't normally fit.",
       ]],
       ['Scent', [
         'When it loses you, it starts <b>sniffing</b> and follows your trail.',
@@ -138,9 +139,10 @@ export class Menu {
         `${kb('slash')} slashes and stuns it up close. ${kb('lure')} throws a glowing lure that it chases instead of you.`,
         'Both use claw charges. The veins on your arm show them (2 max, about 25 s each to refill) and pulse faster when it is near.',
       ]],
-      ['Its lunge', [
+      ['Its lunge and charge', [
         'Before it bites, its eyes flare and a cymbal crashes. <b>Sidestep or back off.</b>',
         'Or <b>parry</b>: slash the moment its eyes flash white. It gets knocked back and stunned for longer.',
+        'In a chase it sometimes crouches and <b>drums</b>, then charges. It turns badly: sidestep, or put a wall between you. Afterwards it is winded for a moment.',
       ]],
       ['Waking a tower', [
         '1. Stand in the glowing rune circle to charge it to 50%. The hum is loud, so it will come.',

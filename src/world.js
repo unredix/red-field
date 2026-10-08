@@ -161,7 +161,15 @@ export class World {
   // ---------------------------------------------------------------- navigation grid
   // Cells are blocked where a creature of `radius` would overlap an obstacle
   // that sits between minH and maxH above the ground (it steps over lower ones).
-  buildNav(minX, minZ, maxX, maxZ, cell, radius, minH = 0.6, maxH = 2.4) {
+  // A second, finer grid (`navSqueeze`) is for the monster squeezing through
+  // gaps only the player normally fits through (radius `squeeze`), crawling
+  // under anything higher than `crawlH` (a shed roof).
+  buildNav(minX, minZ, maxX, maxZ, cell, radius, minH = 0.6, maxH = 2.4, squeeze = 0.45, crawlH = 1.6) {
+    this.nav = this._rasterNav(minX, minZ, maxX, maxZ, cell, radius, minH, maxH);
+    this.navSqueeze = squeeze ? this._rasterNav(minX, minZ, maxX, maxZ, cell / 2, squeeze, minH, crawlH) : null;
+  }
+
+  _rasterNav(minX, minZ, maxX, maxZ, cell, radius, minH, maxH) {
     const cols = Math.ceil((maxX - minX) / cell);
     const rows = Math.ceil((maxZ - minZ) / cell);
     const blocked = new Uint8Array(cols * rows);
@@ -188,33 +196,54 @@ export class World {
         }
       }
     }
-    this.nav = { minX, minZ, cell, cols, rows, blocked, radius };
+    // connected components: paths are only ever planned inside one of them
+    const N = cols * rows, comp = new Int32Array(N).fill(-1), sizes = [], stack = [];
+    for (let i = 0; i < N; i++) {
+      if (blocked[i] || comp[i] >= 0) continue;
+      const id = sizes.length;
+      let size = 0;
+      comp[i] = id; stack.push(i);
+      while (stack.length) {
+        const c = stack.pop(); size++;
+        const x = c % cols, y = (c / cols) | 0;
+        if (x > 0 && !blocked[c - 1] && comp[c - 1] < 0) { comp[c - 1] = id; stack.push(c - 1); }
+        if (x < cols - 1 && !blocked[c + 1] && comp[c + 1] < 0) { comp[c + 1] = id; stack.push(c + 1); }
+        if (y > 0 && !blocked[c - cols] && comp[c - cols] < 0) { comp[c - cols] = id; stack.push(c - cols); }
+        if (y < rows - 1 && !blocked[c + cols] && comp[c + cols] < 0) { comp[c + cols] = id; stack.push(c + cols); }
+      }
+      sizes.push(size);
+    }
+    let main = 0;
+    for (let i = 1; i < sizes.length; i++) if (sizes[i] > sizes[main]) main = i;
+    return { minX, minZ, cell, cols, rows, blocked, radius, comp, sizes, main };
   }
 
-  _cellOf(x, z) {
-    const n = this.nav;
+  // The grid helpers below take an optional grid (default: the normal one).
+  _cellOf(x, z, n = this.nav) {
     const c = Math.floor((x - n.minX) / n.cell), r = Math.floor((z - n.minZ) / n.cell);
     return [Math.max(0, Math.min(n.cols - 1, c)), Math.max(0, Math.min(n.rows - 1, r))];
   }
 
-  walkable(x, z) {
-    if (!this.nav) return true;
-    const n = this.nav;
+  walkable(x, z, n = this.nav) {
+    if (!n) return true;
     const c = Math.floor((x - n.minX) / n.cell), r = Math.floor((z - n.minZ) / n.cell);
     if (c < 0 || r < 0 || c >= n.cols || r >= n.rows) return false;
     return !n.blocked[r * n.cols + c];
   }
 
-  // Nearest walkable cell centre to (x,z) (spiral search).
-  nearestWalkable(x, z) {
-    const n = this.nav;
-    const [c0, r0] = this._cellOf(x, z);
-    for (let rad = 0; rad < 20; rad++) {
+  // Nearest walkable cell centre to (x,z) (spiral search). With `comp`, only
+  // cells of that connected component count.
+  nearestWalkable(x, z, comp = -1, n = this.nav) {
+    const [c0, r0] = this._cellOf(x, z, n);
+    const maxRad = Math.max(n.cols, n.rows);
+    for (let rad = 0; rad < maxRad; rad++) {
       let best = null, bestD = Infinity;
       for (let r = r0 - rad; r <= r0 + rad; r++) {
-        for (let c = c0 - rad; c <= c0 + rad; c++) {
-          if (Math.max(Math.abs(r - r0), Math.abs(c - c0)) !== rad) continue;
-          if (c < 0 || r < 0 || c >= n.cols || r >= n.rows || n.blocked[r * n.cols + c]) continue;
+        const edge = Math.abs(r - r0) === rad;
+        for (let c = c0 - rad; c <= c0 + rad; c += edge ? 1 : 2 * rad || 1) {
+          if (c < 0 || r < 0 || c >= n.cols || r >= n.rows) continue;
+          const i = r * n.cols + c;
+          if (n.blocked[i] || (comp >= 0 && n.comp[i] !== comp)) continue;
           const cx = n.minX + (c + 0.5) * n.cell, cz = n.minZ + (r + 0.5) * n.cell;
           const d = (cx - x) ** 2 + (cz - z) ** 2;
           if (d < bestD) { bestD = d; best = new THREE.Vector3(cx, 0, cz); }
@@ -225,30 +254,64 @@ export class World {
     return new THREE.Vector3(x, 0, z);
   }
 
+  // Nearest walkable cell of component `comp` within maxR m of (x,z) that can
+  // see the point (x, y, z) from eyeH m up (so it doesn't stop on the wrong side
+  // of a wall). null if there's none.
+  nearestVisible(x, z, y, comp, maxR = 6, eyeH = 3, n = this.nav) {
+    const [c0, r0] = this._cellOf(x, z, n), R = Math.ceil(maxR / n.cell);
+    const to = new THREE.Vector3(x, y, z), from = new THREE.Vector3();
+    const cands = [];
+    for (let r = r0 - R; r <= r0 + R; r++) {
+      for (let c = c0 - R; c <= c0 + R; c++) {
+        if (c < 0 || r < 0 || c >= n.cols || r >= n.rows) continue;
+        const i = r * n.cols + c;
+        if (n.blocked[i] || n.comp[i] !== comp) continue;
+        const cx = n.minX + (c + 0.5) * n.cell, cz = n.minZ + (r + 0.5) * n.cell;
+        const d = (cx - x) ** 2 + (cz - z) ** 2;
+        if (d <= maxR * maxR) cands.push([d, cx, cz]);
+      }
+    }
+    cands.sort((a, b) => a[0] - b[0]);
+    for (const [, cx, cz] of cands) {
+      const g = this.heightFn ? this.heightFn(cx, cz) : 0;
+      if (this.lineOfSight(from.set(cx, g + eyeH, cz), to)) return new THREE.Vector3(cx, 0, cz);
+    }
+    return null;
+  }
+
+  // Connected component of the cell at (x,z), or -1 if it's blocked.
+  compAt(x, z, n = this.nav) {
+    const [c, r] = this._cellOf(x, z, n);
+    const i = r * n.cols + c;
+    return n.blocked[i] ? -1 : n.comp[i];
+  }
+
   // Walkable straight line on the grid (for path smoothing).
-  _clearLine(ax, az, bx, bz) {
+  _clearLine(ax, az, bx, bz, n = this.nav) {
     const d = Math.hypot(bx - ax, bz - az);
-    const steps = Math.ceil(d / (this.nav.cell * 0.4));
+    const steps = Math.ceil(d / (n.cell * 0.4));
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
-      if (!this.walkable(ax + (bx - ax) * t, az + (bz - az) * t)) return false;
+      if (!this.walkable(ax + (bx - ax) * t, az + (bz - az) * t, n)) return false;
     }
     return true;
   }
 
   // A* on the grid. Returns an array of Vector3 waypoints (y = 0) or null.
-  findPath(from, to) {
-    const n = this.nav;
+  findPath(from, to, n = this.nav) {
     if (!n) return [to.clone()];
-    let start = this._cellOf(from.x, from.z);
-    if (n.blocked[start[1] * n.cols + start[0]]) {
-      const w = this.nearestWalkable(from.x, from.z);
-      start = this._cellOf(w.x, w.z);
+    // start: snap onto the main walkable area if we're off it (pushed into a
+    // corner, knocked back...); goal: the closest point we can actually get to
+    let start = this._cellOf(from.x, from.z, n);
+    if (this.compAt(from.x, from.z, n) !== n.main) {
+      const w = this.nearestWalkable(from.x, from.z, n.main, n);
+      start = this._cellOf(w.x, w.z, n);
     }
+    const sComp = n.comp[start[1] * n.cols + start[0]];
     let goalP = to;
-    if (!this.walkable(to.x, to.z)) goalP = this.nearestWalkable(to.x, to.z);
-    const goal = this._cellOf(goalP.x, goalP.z);
-    if (this._clearLine(from.x, from.z, goalP.x, goalP.z)) return [new THREE.Vector3(goalP.x, 0, goalP.z)];
+    if (this.compAt(to.x, to.z, n) !== sComp) goalP = this.nearestWalkable(to.x, to.z, sComp, n);
+    const goal = this._cellOf(goalP.x, goalP.z, n);
+    if (this._clearLine(from.x, from.z, goalP.x, goalP.z, n)) return [new THREE.Vector3(goalP.x, 0, goalP.z)];
 
     const N = n.cols * n.rows;
     const gScore = new Float32Array(N).fill(Infinity);
@@ -280,7 +343,7 @@ export class World {
     gScore[si] = 0;
     push(h(start[0], start[1]), si);
     let found = false, iter = 0;
-    while (open.length && iter++ < 60000) {
+    while (open.length && iter++ < N * 2) {
       const [, cur] = pop();
       if (cur === gi) { found = true; break; }
       if (closed[cur]) continue;
@@ -312,7 +375,7 @@ export class World {
     while (k < pts.length) {
       let far = k;
       for (let j = pts.length - 1; j > k; j--) {
-        if (this._clearLine(ax, az, pts[j].x, pts[j].z)) { far = j; break; }
+        if (this._clearLine(ax, az, pts[j].x, pts[j].z, n)) { far = j; break; }
       }
       out.push(pts[far]);
       ax = pts[far].x; az = pts[far].z;
